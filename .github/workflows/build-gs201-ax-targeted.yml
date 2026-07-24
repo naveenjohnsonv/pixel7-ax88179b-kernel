@@ -110,50 +110,122 @@ jobs:
         sublevel: ${{ steps.extract.outputs.sublevel }}
         os_patch_level: "2025-09"
 
-    - name: Setup KernelSU-Next
-      uses: ./.github/actions/kernelsu
-      with:
-        ksu_branch: dev
-
-    - name: Use latest Pershoot SUSFS dev branch
+    - name: Normalize rolling KernelSU and SUSFS actions
       shell: bash
       run: |
+        set -euo pipefail
+
+        git ls-remote --exit-code --heads \
+          https://github.com/pershoot/KernelSU-Next.git \
+          refs/heads/dev-susfs >/dev/null
+        git ls-remote --exit-code --heads \
+          https://gitlab.com/pershoot/susfs4ksu.git \
+          refs/heads/gki-android14-6.1-dev >/dev/null
+
+        preflight_dir="$(mktemp -d)"
+        trap 'rm -rf "$preflight_dir"' EXIT
+        git clone --quiet --depth=1 --branch dev-susfs \
+          https://github.com/pershoot/KernelSU-Next.git \
+          "$preflight_dir/KernelSU-Next"
+        test -f "$preflight_dir/KernelSU-Next/kernel/setup.sh"
+        test -f "$preflight_dir/KernelSU-Next/kernel/Kbuild"
+        test -f "$preflight_dir/KernelSU-Next/kernel/Kconfig"
+
+        git clone --quiet --depth=1 --branch gki-android14-6.1-dev \
+          https://gitlab.com/pershoot/susfs4ksu.git \
+          "$preflight_dir/susfs4ksu"
+        test -f "$preflight_dir/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
+        test -f "$preflight_dir/susfs4ksu/kernel_patches/include/linux/susfs.h"
+        test -f "$preflight_dir/susfs4ksu/kernel_patches/fs/susfs.c"
+
         python3 - <<'PY'
         from pathlib import Path
         import re
 
-        path = Path(".github/actions/susfs/action.yml")
-        source = path.read_text(encoding="utf-8")
+        # The rolling WildKernels KernelSU action currently uses a sed
+        # replacement with '/' as its delimiter. A tag containing '/' makes
+        # that command fail. Keep its behavior, but sanitize the tag and use
+        # a safe delimiter. Also make the reported version follow dev-susfs,
+        # which is the branch actually compiled by this workflow.
+        ksu_path = Path('.github/actions/kernelsu/action.yml')
+        ksu = ksu_path.read_text(encoding='utf-8')
 
-        action_input = "$" + "{{ inputs.version }}"
-        original_branch = f'SUSFS_BRANCH="gki-{action_input}"'
-        dev_branch = f'SUSFS_BRANCH="gki-{action_input}-dev"'
-        source = source.replace(original_branch, dev_branch)
-        source = source.replace(
-            'SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"',
-            'SUSFS_REPO="https://gitlab.com/pershoot/susfs4ksu.git"',
+        required_ksu_markers = (
+            'https://github.com/pershoot/KernelSU-Next.git',
+            'KSU_VERSION_TAG_FALLBACK := v0.0.1',
+            'origin/dev',
         )
+        missing = [marker for marker in required_ksu_markers if marker not in ksu]
+        if missing:
+            raise SystemExit(f'Unexpected KernelSU action layout; missing: {missing}')
 
-        source, count = re.subn(
+        ksu, tag_fix_count = re.subn(
+            r'(?m)^(\s*)sed -i "s/\^KSU_VERSION_TAG_FALLBACK := '
+            r'v0\.0\.1\$/KSU_VERSION_TAG_FALLBACK := '
+            r'\$\{KSU_GIT_TAG\}/" Kbuild\s*$',
+            r'\1SAFE_KSU_GIT_TAG="${KSU_GIT_TAG//\//-}"\n'
+            r'\1sed -i "s|^KSU_VERSION_TAG_FALLBACK := v0.0.1$|'
+            r'KSU_VERSION_TAG_FALLBACK := ${SAFE_KSU_GIT_TAG}|" Kbuild',
+            ksu,
+            count=1,
+        )
+        if tag_fix_count != 1:
+            raise SystemExit('Could not replace the fragile KernelSU tag sed command')
+
+        ksu = ksu.replace(
+            'git fetch --depth=50 origin dev 2>/dev/null || true',
+            'git fetch --depth=50 origin dev-susfs 2>/dev/null || true',
+        )
+        ksu = ksu.replace('origin/dev 2>/dev/null', 'origin/dev-susfs 2>/dev/null')
+        if 'origin/dev 2>/dev/null' in ksu:
+            raise SystemExit('KernelSU metadata still targets dev instead of dev-susfs')
+        ksu_path.write_text(ksu, encoding='utf-8')
+
+        # The rolling SUSFS action contains stale cherry-picks. Follow the
+        # maintained Pershoot Android 14 / 6.1 dev branch directly and retain
+        # the action's existing config and version-specific patching steps.
+        susfs_path = Path('.github/actions/susfs/action.yml')
+        susfs = susfs_path.read_text(encoding='utf-8')
+        input_expr = '${{ inputs.version }}'
+        base_branch = f'SUSFS_BRANCH="gki-{input_expr}"'
+        dev_branch = f'SUSFS_BRANCH="gki-{input_expr}-dev"'
+
+        if base_branch not in susfs:
+            raise SystemExit('Unexpected SUSFS action layout: branch assignment missing')
+        if 'https://gitlab.com/simonpunk/susfs4ksu.git' not in susfs:
+            raise SystemExit('Unexpected SUSFS action layout: source repository missing')
+
+        susfs = susfs.replace(base_branch, dev_branch, 1)
+        susfs = susfs.replace(
+            'https://gitlab.com/simonpunk/susfs4ksu.git',
+            'https://gitlab.com/pershoot/susfs4ksu.git',
+            1,
+        )
+        susfs, cherry_pick_count = re.subn(
             r'\n[ \t]*cd susfs4ksu\n[ \t]*COMMIT1=.*?'
             r'[ \t]*git cherry-pick "\$COMMIT2"\n',
             '\n',
-            source,
+            susfs,
             count=1,
             flags=re.DOTALL,
         )
-        if count not in (0, 1):
-            raise SystemExit("Unexpected number of SUSFS cherry-pick blocks")
-        if "COMMIT1=" in source or "git cherry-pick" in source:
-            raise SystemExit("Obsolete SUSFS cherry-pick logic is still present")
-        if dev_branch not in source:
-            raise SystemExit("Could not select the Pershoot SUSFS dev branch")
-        if "https://gitlab.com/pershoot/susfs4ksu.git" not in source:
-            raise SystemExit("Could not select the Pershoot SUSFS repository")
+        if cherry_pick_count != 1:
+            raise SystemExit('Could not remove the stale SUSFS cherry-pick block')
+        if 'COMMIT1=' in susfs or 'git cherry-pick' in susfs:
+            raise SystemExit('Stale SUSFS cherry-pick logic remains')
+        if dev_branch not in susfs:
+            raise SystemExit('SUSFS dev branch replacement failed')
+        susfs_path.write_text(susfs, encoding='utf-8')
 
-        path.write_text(source, encoding="utf-8")
-        print("SUSFS action now follows pershoot/gki-android14-6.1-dev directly")
+        print('KernelSU branch: dev-susfs')
+        print('SUSFS branch: gki-android14-6.1-dev')
+        print('Rolling action workarounds applied successfully')
         PY
+
+    - name: Setup KernelSU-Next
+      uses: ./.github/actions/kernelsu
+      with:
+        ksu_branch: dev-susfs
 
     - name: Setup SUSFS
       uses: ./.github/actions/susfs
@@ -163,6 +235,30 @@ jobs:
         kernel_version: "6.1"
         os_patch_level: "2025-09"
         sublevel: ${{ steps.extract.outputs.sublevel }}
+
+    - name: Verify KernelSU and SUSFS integration
+      shell: bash
+      run: |
+        set -euo pipefail
+        ksu_dir="${{ github.workspace }}/kernel/KernelSU-Next/kernel"
+        test "$(git -C "$ksu_dir" rev-parse --is-inside-work-tree)" = "true"
+        git -C "$ksu_dir" fetch --quiet --depth=1 origin dev-susfs
+        test "$(git -C "$ksu_dir" rev-parse HEAD)" = \
+             "$(git -C "$ksu_dir" rev-parse origin/dev-susfs)"
+
+        test -L "${{ github.workspace }}/kernel/common/drivers/kernelsu"
+        grep -Fq 'obj-$(CONFIG_KSU) += kernelsu/' \
+          "${{ github.workspace }}/kernel/common/drivers/Makefile"
+        grep -Fq 'source "drivers/kernelsu/Kconfig"' \
+          "${{ github.workspace }}/kernel/common/drivers/Kconfig"
+        test -f "${{ github.workspace }}/kernel/common/include/linux/susfs.h"
+        test -f "${{ github.workspace }}/kernel/common/fs/susfs.c"
+        grep -q '^CONFIG_KSU=y$' "${{ github.workspace }}/wild_gki.fragment"
+        grep -q '^CONFIG_KSU_SUSFS=y$' "${{ github.workspace }}/wild_gki.fragment"
+        grep -q '^CONFIG_KSU_SUSFS_SUS_MOUNT=y$' "${{ github.workspace }}/wild_gki.fragment"
+        grep -q '^CONFIG_KSU_SUSFS_SUS_KSTAT=y$' "${{ github.workspace }}/wild_gki.fragment"
+        grep -q '^CONFIG_KSU_SUSFS_SPOOF_UNAME=y$' "${{ github.workspace }}/wild_gki.fragment"
+        echo "KernelSU dev-susfs and SUSFS integration verified"
 
     - name: Baseband Guard
       uses: ./.github/actions/bbg
