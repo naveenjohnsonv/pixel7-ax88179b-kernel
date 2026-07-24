@@ -7,42 +7,69 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: thewildjames-r5-ax88179b
+  group: thewildjames-r5-ax88179b-no-susfs
   cancel-in-progress: false
 
 jobs:
   build-gki:
-    name: "6.1.145-android14-2025-09-TheWildJames + AX88179B"
+    name: "6.1.145-android14-2025-09-TheWildJames + AX88179B (No SUSFS)"
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
-    - name: Checkout Repository
+    # This workflow may live in an otherwise empty personal repository.
+    # Check out the complete upstream r5 source tree so every repository-local
+    # action used below is present under .github/actions.
+    - name: Checkout pinned WildKernels r5 source
       uses: actions/checkout@v5
       with:
-        fetch-depth: 0
+        repository: WildKernels/GKI_KernelSU_SUSFS
+        ref: 705c7fc281572e8759eaaaec8b47ec579443fa08
+        fetch-depth: 1
+        persist-credentials: false
 
-    - name: Verify exact r5 baseline
+    - name: Verify pinned source and required local actions
       shell: bash
       run: |
         set -euo pipefail
         EXPECTED_BASE="705c7fc281572e8759eaaaec8b47ec579443fa08"
+        ACTUAL_BASE="$(git rev-parse HEAD)"
 
-        git cat-file -e "${EXPECTED_BASE}^{commit}"
-        git merge-base --is-ancestor "$EXPECTED_BASE" HEAD
+        echo "Expected upstream commit: $EXPECTED_BASE"
+        echo "Checked-out commit:       $ACTUAL_BASE"
+        test "$ACTUAL_BASE" = "$EXPECTED_BASE"
 
-        # These files control the build and dependency pins. They must remain
-        # byte-for-byte identical to r5; only this standalone workflow is custom.
-        git diff --exit-code "$EXPECTED_BASE" -- \
-          .github/actions \
-          .github/config/commits.json \
-          AnyKernel3 \
-          ':(exclude).github/actions/ax88179b-quirks'
+        required_actions=(
+          setup-build-environment
+          download-kernel
+          extract-sublevel-file-name
+          kernel-fixes
+          kernelsu
+          bbg
+          networking
+          droidspaces
+          misc
+          apply-device-patches
+          apply-kernel-branding
+          remove-protected-exports
+          clean-kernel-flags
+          scan-patch-rejects
+          cache-setup
+          cache-restore
+          cache-save
+          cache-stats
+          build-kernel
+        )
+
+        for action in "${required_actions[@]}"; do
+          test -f ".github/actions/$action/action.yml" || {
+            echo "Missing local action: .github/actions/$action/action.yml" >&2
+            exit 1
+          }
+        done
 
         test "$(jq -r '.kernelsu.dev' .github/config/commits.json)" = \
           "5a4a71874caaad06aa126f761c93391de1d32361"
-        test "$(jq -r '.susfs["gki-android14-6.1"]' .github/config/commits.json)" = \
-          "9bf72ec2c83d40f194b936cabbc64ce342e005bf"
 
     - name: 🧹 Emergency Disk Cleanup
       if: false
@@ -188,17 +215,7 @@ jobs:
       with:
         use_latest_commits: false
 
-    - name: SUSFS
-      uses: ./.github/actions/susfs
-      with:
-        use_latest_commits: false
-        version: android14-6.1
-        android_version: android14
-        kernel_version: "6.1"
-        os_patch_level: "2025-09"
-        sublevel: ${{ steps.extract.outputs.sublevel }}
-
-    - name: Verify pinned KernelSU Next and SUSFS
+    - name: Verify pinned KernelSU Next and SUSFS exclusion
       shell: bash
       run: |
         set -euo pipefail
@@ -207,12 +224,11 @@ jobs:
         ACTUAL_KSU="$(git -C kernel/KernelSU-Next rev-parse HEAD)"
         test "$ACTUAL_KSU" = "$EXPECTED_KSU"
 
-        EXPECTED_SUSFS="$(jq -r '.susfs["gki-android14-6.1"]' .github/config/commits.json)"
-        ACTUAL_SUSFS="$(git -C susfs4ksu rev-parse HEAD)"
-        test "$ACTUAL_SUSFS" = "$EXPECTED_SUSFS"
+        # The dedicated SUSFS action must not have run or created its source tree.
+        test ! -e "${{ github.workspace }}/susfs4ksu"
 
         echo "KernelSU Next commit: $ACTUAL_KSU"
-        echo "SUSFS commit:        $ACTUAL_SUSFS"
+        echo "SUSFS: not included"
 
     - name: Baseband Guard
       uses: ./.github/actions/bbg
@@ -430,14 +446,6 @@ jobs:
 
         required_configs=(
           'CONFIG_KSU=y'
-          'CONFIG_KSU_SUSFS=y'
-          'CONFIG_KSU_SUSFS_SUS_PATH=y'
-          'CONFIG_KSU_SUSFS_SUS_MOUNT=y'
-          'CONFIG_KSU_SUSFS_SUS_KSTAT=y'
-          'CONFIG_KSU_SUSFS_SPOOF_UNAME=y'
-          'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y'
-          'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y'
-          'CONFIG_KSU_SUSFS_SUS_MAP=y'
           'CONFIG_BBG=y'
           'CONFIG_SYSVIPC=y'
           'CONFIG_IPC_NS=y'
@@ -463,22 +471,27 @@ jobs:
           }
         done
 
+        if grep -Eq '^CONFIG_KSU_SUSFS(=|_)' "$CONFIG_OUT"; then
+          echo "SUSFS configuration unexpectedly present:" >&2
+          grep -E '^CONFIG_KSU_SUSFS(=|_)' "$CONFIG_OUT" >&2
+          exit 1
+        fi
+
         grep -A3 -B1 'USB_DEVICE(0x0b95, 0x1790)' \
           "${{ github.workspace }}/kernel/common/drivers/usb/core/quirks.c"
 
         FULL_KSU_COMMIT="$(git -C "${{ github.workspace }}/kernel/KernelSU-Next" rev-parse HEAD)"
-        FULL_SUSFS_COMMIT="$(git -C "${{ github.workspace }}/susfs4ksu" rev-parse HEAD)"
 
         cat > "${{ github.workspace }}/AnyKernel3/AX88179B-BUILD.txt" <<EOF
         Base workflow commit: 705c7fc281572e8759eaaaec8b47ec579443fa08 (r5)
         Kernel target: 6.1.145-android14-2025-09-TheWildJames
-        Feature set: FULL (KernelSU Next + SUSFS + BBG + NET + DroidSpaces)
+        Feature set: KernelSU Next + BBG + Networking + DroidSpaces (SUSFS excluded)
         KernelSU implementation: KernelSU Next
         KernelSU Next commit: ${FULL_KSU_COMMIT}
         KernelSU version code: ${KSU_VERSION:-unknown}
         KernelSU tag: ${KSU_GIT_TAG:-unknown}
         Required manager: KernelSU Next Manager (not original KernelSU Manager)
-        SUSFS commit: ${FULL_SUSFS_COMMIT}
+        SUSFS: not included
         Device quirk: 0b95:1790 RESET_RESUME + NO_LPM
         Runtime equivalent: usbcore.quirks=0b95:1790:bk
         EOF
@@ -493,7 +506,7 @@ jobs:
       working-directory: ${{ github.workspace }}/AnyKernel3
       run: |
         set -euo pipefail
-        ZIP_NAME="${{ steps.extract.outputs.file_name }}-AX88179B-AnyKernel3.zip"
+        ZIP_NAME="${{ steps.extract.outputs.file_name }}-AX88179B-NoSUSFS-AnyKernel3.zip"
         zip -r9 "${{ github.workspace }}/$ZIP_NAME" . \
           -x '.git/*' '.github/*' README.md
         echo "AX_ZIP=${{ github.workspace }}/$ZIP_NAME" >> "$GITHUB_ENV"
@@ -501,7 +514,7 @@ jobs:
     - name: Upload flashable AX88179B ZIP
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.extract.outputs.file_name }}-AX88179B-Flashable
+        name: ${{ steps.extract.outputs.file_name }}-AX88179B-NoSUSFS-Flashable
         path: ${{ env.AX_ZIP }}
         if-no-files-found: error
         compression-level: 0
@@ -509,7 +522,7 @@ jobs:
     - name: Upload Artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.extract.outputs.file_name }}-AnyKernel3
+        name: ${{ steps.extract.outputs.file_name }}-NoSUSFS-AnyKernel3
         path: ${{ github.workspace }}/AnyKernel3/**
         if-no-files-found: ignore
         compression-level: 9
