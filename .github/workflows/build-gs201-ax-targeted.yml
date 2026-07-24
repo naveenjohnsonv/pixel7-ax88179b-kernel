@@ -433,13 +433,6 @@ jobs:
         if-no-files-found: ignore
         compression-level: 9
 
-    - name: Get prebuilt ccache (downloaded once by prepare-ccache)
-      uses: actions/download-artifact@v8
-      with:
-        name: ccache-binary
-        path: ccache-dl
-      continue-on-error: true
-
     - name: 'Setup Cache and Build Environment'
       uses: ./.github/actions/cache-setup
       with:
