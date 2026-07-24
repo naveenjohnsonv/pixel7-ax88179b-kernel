@@ -394,5 +394,5 @@ jobs:
         name: ${{ steps.extract.outputs.file_name }}-AX88179B-SUSFS-AnyKernel3
         path: ${{ github.workspace }}/AnyKernel3/**
         if-no-files-found: error
-        compression-level: 0
+        compression-level: 9
         retention-days: 14
