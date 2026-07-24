@@ -1,47 +1,42 @@
-name: Build latest TheWildJames AX88179B
+name: Build latest TheWildJames AX88179B + SUSFS
+
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 on:
   workflow_dispatch:
 
+concurrency:
+  group: thewildjames-ax88179b-susfs
+  cancel-in-progress: true
+
 jobs:
   build-gki:
-    name: "6.1.145-android14-2025-09-TheWildJames + AX88179B"
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+    name: "6.1.145-android14-2025-09-TheWildJames + AX88179B + SUSFS"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
 
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v7
       with:
         repository: WildKernels/GKI_KernelSU_SUSFS
+        fetch-depth: 1
+        persist-credentials: false
 
-    - name: 🧹 Emergency Disk Cleanup
-      if: false
-      uses: ./.github/actions/disk-cleanup
-
-    - name: Free Disk Space
-      if: true
-      uses: endersonmenezes/free-disk-space@v3  # Use @main for latest, @v3 for stable
-      with:
-        remove_android: true
-        remove_dotnet: true
-        remove_haskell: true
-        remove_tool_cache: true
-        remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
-        remove_packages_one_command: true
-        remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
-        rm_cmd: "rmz"  # Use 'rmz' for faster deletion (default: 'rm')
-        rmz_version: "3.1.1"  # Required when rm_cmd is 'rmz'
-        testing: false
-
-    - name: Setup more Swap (for LTO)
-      uses: thejerrybao/setup-swap-space@v1   # or pierotofy/set-swap-space
-      with:
-        swap-size-gb: 16          # 10-24 GB is common for heavy LTO
-        # swap-space-path: /mnt/swapfile   # optional
+    - name: Quick disk cleanup for source sync
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The raw log showed these five directories accounted for most of the
+        # useful space and can be removed much faster than apt package purges.
+        sudo rm -rf \
+          /usr/local/lib/android \
+          /usr/share/dotnet \
+          /opt/ghc \
+          /usr/local/.ghcup \
+          /usr/share/swift
+        df -h /
 
     - name: Setup Build Environment
       uses: ./.github/actions/setup-build-environment
@@ -111,6 +106,7 @@ jobs:
         os_patch_level: "2025-09"
 
     - name: Setup KernelSU-Next (rolling dev-susfs)
+      id: ksu
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
@@ -126,8 +122,11 @@ jobs:
 
         # Ensure the checked-out source is the current dev-susfs tip while
         # retaining origin/dev, which KernelSU uses for its version number.
-        git -C "$ksu_repo" fetch --quiet origin dev dev-susfs --tags
-        git -C "$ksu_repo" checkout -B dev-susfs origin/dev-susfs
+        git -C "$ksu_repo" fetch --quiet --force origin \
+          +refs/heads/dev:refs/remotes/origin/dev \
+          +refs/heads/dev-susfs:refs/remotes/origin/dev-susfs \
+          --tags
+        git -C "$ksu_repo" checkout -B dev-susfs refs/remotes/origin/dev-susfs
 
         test -L "$PWD/common/drivers/kernelsu"
         test -f "$ksu_repo/kernel/Kbuild"
@@ -145,7 +144,7 @@ jobs:
           exit 1
         fi
 
-        base_commit="$(git -C "$ksu_repo" merge-base HEAD origin/dev)"
+        base_commit="$(git -C "$ksu_repo" merge-base HEAD refs/remotes/origin/dev)"
         ksu_git_version="$(git -C "$ksu_repo" rev-list --count "$base_commit")"
         ksu_version="$((30000 + ksu_git_version))"
         ksu_tag="$(git -C "$ksu_repo" describe --tags --abbrev=0 "$base_commit" 2>/dev/null || echo v0.0.0)"
@@ -154,9 +153,13 @@ jobs:
         echo "KSU_VERSION=$ksu_version" >> "$GITHUB_ENV"
         echo "KSU_GIT_TAG=$ksu_tag" >> "$GITHUB_ENV"
         echo "KSU_COMMIT=$ksu_commit" >> "$GITHUB_ENV"
+        echo "version=$ksu_version" >> "$GITHUB_OUTPUT"
+        echo "tag=$ksu_tag" >> "$GITHUB_OUTPUT"
+        echo "commit=$ksu_commit" >> "$GITHUB_OUTPUT"
         echo "KernelSU-Next: branch=dev-susfs commit=$ksu_commit version=$ksu_version tag=$ksu_tag"
 
     - name: Integrate SUSFS (rolling Android 14 / 6.1 dev)
+      id: susfs
       shell: bash
       run: |
         set -euo pipefail
@@ -190,7 +193,9 @@ jobs:
           exit 1
         fi
 
-        echo "SUSFS commit: $(git -C "$susfs_repo" rev-parse --short HEAD)"
+        susfs_commit="$(git -C "$susfs_repo" rev-parse --short HEAD)"
+        echo "commit=$susfs_commit" >> "$GITHUB_OUTPUT"
+        echo "SUSFS commit: $susfs_commit"
 
     - name: Enable KernelSU and SUSFS configs
       uses: ./.github/actions/set-kernel-config
@@ -220,7 +225,7 @@ jobs:
 
         test "$(git -C "$ksu_repo" rev-parse --abbrev-ref HEAD)" = "dev-susfs"
         test "$(git -C "$ksu_repo" rev-parse HEAD)" = \
-             "$(git -C "$ksu_repo" rev-parse origin/dev-susfs)"
+             "$(git -C "$ksu_repo" rev-parse refs/remotes/origin/dev-susfs)"
         test -L "$kernel_tree/drivers/kernelsu"
         grep -Fq 'obj-$(CONFIG_KSU) += kernelsu/' "$kernel_tree/drivers/Makefile"
         grep -Fq 'source "drivers/kernelsu/Kconfig"' "$kernel_tree/drivers/Kconfig"
@@ -425,198 +430,223 @@ jobs:
       uses: ./.github/actions/scan-patch-rejects
         
     - name: Upload Rejects
-      if: ${{ always() }}
+      if: ${{ always() && steps.scan.outputs.rej_count != '0' }}
       uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.extract.outputs.file_name }}-Rejects
         path: patch-rejects/
         if-no-files-found: ignore
-        compression-level: 9
+        compression-level: 6
 
-    - name: 'Setup Cache and Build Environment'
-      uses: ./.github/actions/cache-setup
+    - name: Initialize Bazel cache and config fragment
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p /home/runner/.cache/bazel
+        touch "${{ github.workspace }}/wild_gki.fragment"
+        # Bazel uses its hermetic JDK; an inherited JRE-only JAVA_HOME produced
+        # a warning in the previous run.
+        echo "JAVA_HOME=" >> "$GITHUB_ENV"
+
+    - name: Compute exact build fingerprint
+      id: fingerprint
+      shell: bash
+      run: |
+        set -euo pipefail
+        manifest="$(mktemp)"
+        trap 'rm -f "$manifest"' EXIT
+
+        {
+          echo "workflow=${{ github.sha }}"
+          echo "wildkernels=$(git rev-parse HEAD)"
+          echo "kernel=$(git -C kernel/common rev-parse HEAD)"
+          echo "ksu=$(git -C kernel/KernelSU-Next rev-parse HEAD)"
+          echo "susfs=$(git -C susfs4ksu rev-parse HEAD)"
+          echo "bbg=${BBG_COMMIT:-unknown}"
+          echo "target=android14-6.1.145-2025-09-TheWildJames"
+          git -C kernel/common diff --binary --no-ext-diff HEAD
+          while IFS= read -r -d '' file; do
+            printf 'untracked=%s\n' "$file"
+            sha256sum "kernel/common/$file"
+          done < <(git -C kernel/common ls-files --others --exclude-standard -z | sort -z)
+        } > "$manifest"
+
+        fingerprint="$(sha256sum "$manifest" | awk '{print substr($1,1,32)}')"
+        echo "value=$fingerprint" >> "$GITHUB_OUTPUT"
+        echo "Build fingerprint: $fingerprint"
+
+    - name: Restore exact compiled images
+      id: image-cache
+      uses: actions/cache/restore@v6
       with:
-        version: android14-6.1
-        android_version: android14
-        kernel_version: "6.1"
-        sublevel: ${{ steps.extract.outputs.sublevel }}
+        path: ${{ github.workspace }}/.kernel-image-cache
+        key: kernel-images-v2-${{ steps.fingerprint.outputs.value }}
 
-    - name: Restore ccache
-      id: restore-ccache
-      continue-on-error: true
-      if: false
-      uses: ./.github/actions/cache-restore
-      with:
-        cache_path: /home/runner/.ccache
-        cache_key: android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
-        cache_bucket: ccache-cache
-        restore_keys: |
-          android14-6.1.${{ steps.extract.outputs.sublevel }}-
-
-    - name: Restore bazel-cache
-      id: restore-bazel
-      continue-on-error: true
-      if: false
-      uses: ./.github/actions/cache-restore
-      with:
-        cache_path: /home/runner/.cache/bazel
-        cache_key: android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
-        cache_bucket: bazel-cache
-        restore_keys: |
-          android14-6.1.${{ steps.extract.outputs.sublevel }}-
-
-    - name: Cache ccache (GitHub Native)
-      uses: actions/cache@v6
-      with:
-        path: /home/runner/.ccache
-        key: ccache-android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
-        restore-keys: |
-          ccache-android14-6.1.${{ steps.extract.outputs.sublevel }}-
-          ccache-android14-6.1-
-          ccache-
-
-    - name: Cache bazel-cache (GitHub Native)
-      uses: actions/cache@v6
+    - name: Restore rolling Bazel disk cache
+      id: bazel-cache
+      if: steps.image-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v6
       with:
         path: /home/runner/.cache/bazel
-        key: bazel-android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
+        key: bazel-v2-${{ steps.fingerprint.outputs.value }}
         restore-keys: |
-          bazel-android14-6.1.${{ steps.extract.outputs.sublevel }}-
-          bazel-android14-6.1-
-          bazel-
+          bazel-v2-
 
-    - name: Check cache hit
-      run: |
-        echo "Cache restore status:"
-        CCACHE_HIT="${{ steps.restore-ccache.outputs.cache-hit || 'skipped' }}"
-        BAZEL_HIT="${{ steps.restore-bazel.outputs.cache-hit || 'skipped' }}"
-        echo "  ccache: $CCACHE_HIT"
-        echo "  bazel: $BAZEL_HIT"
-
-    - name: Get Cache Stats
-      uses: ./.github/actions/cache-stats
+    - name: Full disk cleanup for compilation
+      if: steps.image-cache.outputs.cache-hit != 'true'
+      uses: endersonmenezes/free-disk-space@v3
       with:
-        clear_stats: true
+        remove_android: false
+        remove_dotnet: false
+        remove_haskell: false
+        remove_tool_cache: true
+        remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+        remove_packages_one_command: true
+        remove_folders: "/usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+        rm_cmd: rmz
+        rmz_version: "3.1.1"
+        testing: false
 
-    - name: Initialize Config Fragment
-      run: touch "${{ github.workspace }}/wild_gki.fragment"
+    - name: Setup swap for compilation
+      if: steps.image-cache.outputs.cache-hit != 'true'
+      uses: thejerrybao/setup-swap-space@v1
+      with:
+        swap-size-gb: 16
 
     - name: Build Normal Kernel
+      if: steps.image-cache.outputs.cache-hit != 'true'
       env:
         SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
         KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
+        JAVA_HOME: ""
       uses: ./.github/actions/build-kernel
       with:
         version: android14-6.1
         bypass: false
 
-    - name: Get Cache Stats
-      uses: ./.github/actions/cache-stats
-      with:
-        clear_stats: false
-
-    - name: Save ccache
-      continue-on-error: true
-      uses: ./.github/actions/cache-save
-      if: false
-      with:
-        cache_path: /home/runner/.ccache
-        cache_key: android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
-        cache_bucket: "ccache-cache"
-        compression_level: 9
-        github_token: ${{ secrets.MY_GITHUB_TOKEN }}
-
-    - name: Save bazel-cache
-      continue-on-error: true
-      uses: ./.github/actions/cache-save
-      if: false
-      with:
-        cache_path: /home/runner/.cache/bazel
-        cache_key: android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
-        cache_bucket: "bazel-cache"
-        compression_level: 9
-        github_token: ${{ secrets.MY_GITHUB_TOKEN }}
-
     - name: Build Bypass Kernel
+      if: steps.image-cache.outputs.cache-hit != 'true'
       env:
         SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
         KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
+        JAVA_HOME: ""
       uses: ./.github/actions/build-kernel
       with:
         bypass: true
         version: android14-6.1
 
-    - name: 📋 Consolidated Build Summary
-      if: ${{ always() }}
+    - name: Store newly compiled images locally
+      if: steps.image-cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
-        SUMMARY_FILE="/tmp/build-summary-${{ steps.extract.outputs.file_name }}.md"
-        
-        # Determine build status
-        if [ "${{ job.status }}" = "success" ]; then
-          STATUS="✅ Success"
+        set -euo pipefail
+        mkdir -p "${{ github.workspace }}/.kernel-image-cache"
+        cp "${{ github.workspace }}/AnyKernel3/Image" \
+           "${{ github.workspace }}/.kernel-image-cache/Image"
+        cp "${{ github.workspace }}/AnyKernel3/Bypass-Image" \
+           "${{ github.workspace }}/.kernel-image-cache/Bypass-Image"
+
+    - name: Save exact compiled images
+      if: steps.image-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ github.workspace }}/.kernel-image-cache
+        key: kernel-images-v2-${{ steps.fingerprint.outputs.value }}
+
+    - name: Save Bazel disk cache
+      if: steps.image-cache.outputs.cache-hit != 'true' && steps.bazel-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: /home/runner/.cache/bazel
+        key: bazel-v2-${{ steps.fingerprint.outputs.value }}
+
+    - name: Restore cached images into AnyKernel3
+      if: steps.image-cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cp "${{ github.workspace }}/.kernel-image-cache/Image" \
+           "${{ github.workspace }}/AnyKernel3/Image"
+        cp "${{ github.workspace }}/.kernel-image-cache/Bypass-Image" \
+           "${{ github.workspace }}/AnyKernel3/Bypass-Image"
+
+        bypass_patch="${{ github.workspace }}/.github/actions/build-kernel/patches/bypass.patch"
+        if patch -d "${{ github.workspace }}/AnyKernel3" -p1 --dry-run --batch \
+             < "$bypass_patch" >/dev/null; then
+          patch -d "${{ github.workspace }}/AnyKernel3" -p1 --batch \
+             < "$bypass_patch"
+        elif patch -d "${{ github.workspace }}/AnyKernel3" -R -p1 --dry-run --batch \
+             < "$bypass_patch" >/dev/null; then
+          echo "AnyKernel3 bypass support already present"
         else
-          STATUS="❌ Failed"
+          echo "Unable to apply AnyKernel3 bypass support" >&2
+          exit 1
         fi
-        
-        # Get kernel version from Image if available
-        KERNEL_VER_STR=""
-        if [ -f "/home/runner/out/dist/Image" ]; then
-          KERNEL_VER_STR=$(strings "/home/runner/out/dist/Image" | grep -m1 "^Linux version " | sed 's/Linux version //' || echo "")
-        elif [ -f "/home/runner/out/Image" ]; then
-          KERNEL_VER_STR=$(strings "/home/runner/out/Image" | grep -m1 "^Linux version " | sed 's/Linux version //' || echo "")
+
+    - name: Validate package and write build information
+      shell: bash
+      run: |
+        set -euo pipefail
+        package="${{ github.workspace }}/AnyKernel3"
+        test -s "$package/Image"
+        test -s "$package/Bypass-Image"
+
+        normal_hash="$(sha256sum "$package/Image" | awk '{print $1}')"
+        bypass_hash="$(sha256sum "$package/Bypass-Image" | awk '{print $1}')"
+        if [ "$normal_hash" = "$bypass_hash" ]; then
+          echo "Normal and bypass kernels are unexpectedly identical" >&2
+          exit 1
         fi
-        
-        # Get KSU version from env (set by kernelsu action)
-        KSU_VER="${KSU_VERSION:-N/A}"
-        KSU_TAG="${KSU_GIT_TAG:-N/A}"
-        
-        # Get cache stats from env (set by cache-stats action)
-        CCACHE_HIT="${CCACHE_HIT_RATE:-N/A}"
-        
-        # Get build time (approximate from step timing)
-        BUILD_TIME="N/A"
-        
-        # Count warnings from build log if available
-        WARNINGS="N/A"
-        
+
+        kernel_version="$(strings "$package/Image" | grep -m1 '^Linux version ' || true)"
+        grep -q 'CONFIG_KSU=y' kernel/common/arch/arm64/configs/gki_defconfig
+        grep -q 'CONFIG_KSU_SUSFS=y' kernel/common/arch/arm64/configs/gki_defconfig
+        grep -q 'CONFIG_BBG=y' kernel/common/arch/arm64/configs/gki_defconfig
+        grep -q 'CONFIG_DEFAULT_TCP_CONG="bbr"' kernel/common/arch/arm64/configs/gki_defconfig
+        grep -q 'CONFIG_USER_NS=y' kernel/common/arch/arm64/configs/gki_defconfig
+        grep -q 'CONFIG_NETFILTER_XT_TARGET_REJECT=y' kernel/common/arch/arm64/configs/gki_defconfig
+        grep -q 'USB_DEVICE(0x0b95, 0x1790)' kernel/common/drivers/usb/core/quirks.c
+        grep -A2 'USB_DEVICE(0x0b95, 0x1790)' kernel/common/drivers/usb/core/quirks.c \
+          | grep -q 'USB_QUIRK_RESET_RESUME'
+        grep -A2 'USB_DEVICE(0x0b95, 0x1790)' kernel/common/drivers/usb/core/quirks.c \
+          | grep -q 'USB_QUIRK_NO_LPM'
+
+        susfs_version="$(awk -F'"' '/^#define SUSFS_VERSION / {print $2}' \
+          kernel/common/include/linux/susfs.h)"
+
+        cat > "$package/BUILD-INFO.txt" <<EOF
+        Target: 6.1.145-android14-2025-09-TheWildJames
+        Kernel: ${kernel_version:-unknown}
+        KernelSU Next branch: dev-susfs
+        KernelSU Next commit: ${{ steps.ksu.outputs.commit }}
+        KernelSU Next version: ${{ steps.ksu.outputs.version }}
+        KernelSU Next tag: ${{ steps.ksu.outputs.tag }}
+        SUSFS version: ${susfs_version:-unknown}
+        SUSFS commit: ${{ steps.susfs.outputs.commit }}
+        AX88179B quirk: RESET_RESUME + NO_LPM for 0b95:1790
+        Server configs: USER_NS + NETFILTER_XT_TARGET_REJECT
+        Build fingerprint: ${{ steps.fingerprint.outputs.value }}
+        Compiled image cache hit: ${{ steps.image-cache.outputs.cache-hit || 'false' }}
+        EOF
+
+        (cd "$package" && sha256sum Image Bypass-Image > SHA256SUMS)
+
         {
-          echo "## android14 6.1.145 (TheWildJames) — ${STATUS}"
+          echo "## Kernel build completed"
           echo
-          echo "| Metric | Value |"
-          echo "|--------|-------|"
-          echo "| **Status** | ${STATUS} |"
-          echo "| **Kernel** | 6.1.145-android14-2025-09 |"
-          if [ -n "$KERNEL_VER_STR" ]; then
-            echo "| **Version String** | \`${KERNEL_VER_STR}\` |"
-          fi
-          echo "| **KSU Version** | ${KSU_VER} |"
-          echo "| **KSU Tag** | ${KSU_TAG} |"
-          echo "| **Feature Set** | KSUN+SUSFS+BBG+NET+DS |"
-          echo "| **Variant** | TheWildJames |"
-          echo
-          
-          # Kernel Fixes
-          if [ -f /tmp/kernel-fixes-summary.md ]; then
-            echo "### 🔧 Kernel Fixes"
-            cat /tmp/kernel-fixes-summary.md
-            echo
-          fi
-        } > "$SUMMARY_FILE"
+          echo "- **Target:** 6.1.145-android14-2025-09-TheWildJames"
+          echo "- **KernelSU Next:** ${{ steps.ksu.outputs.version }} (${{ steps.ksu.outputs.tag }})"
+          echo "- **SUSFS:** ${susfs_version:-unknown}"
+          echo "- **Exact image cache hit:** ${{ steps.image-cache.outputs.cache-hit || 'false' }}"
+          echo "- **Normal SHA-256:** \`$normal_hash\`"
+          echo "- **Bypass SHA-256:** \`$bypass_hash\`"
+        } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Upload Build Summary Artifact
-      if: ${{ always() }}
+    - name: Upload flashable AnyKernel3 package
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.extract.outputs.file_name }}-Summary
-        path: /tmp/build-summary-${{ steps.extract.outputs.file_name }}.md
-        if-no-files-found: ignore
-        compression-level: 9
-
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ steps.extract.outputs.file_name }}-AX88179B-AnyKernel3
+        name: ${{ steps.extract.outputs.file_name }}-AX88179B-SUSFS-AnyKernel3
         path: ${{ github.workspace }}/AnyKernel3/**
-        if-no-files-found: ignore
-        compression-level: 9
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 14
