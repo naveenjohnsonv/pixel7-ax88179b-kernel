@@ -113,7 +113,47 @@ jobs:
     - name: Setup KernelSU-Next
       uses: ./.github/actions/kernelsu
       with:
-        ksu_branch: dev-susfs
+        ksu_branch: dev
+
+    - name: Use latest Pershoot SUSFS dev branch
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
+        import re
+
+        path = Path(".github/actions/susfs/action.yml")
+        source = path.read_text(encoding="utf-8")
+
+        action_input = "$" + "{{ inputs.version }}"
+        original_branch = f'SUSFS_BRANCH="gki-{action_input}"'
+        dev_branch = f'SUSFS_BRANCH="gki-{action_input}-dev"'
+        source = source.replace(original_branch, dev_branch)
+        source = source.replace(
+            'SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"',
+            'SUSFS_REPO="https://gitlab.com/pershoot/susfs4ksu.git"',
+        )
+
+        source, count = re.subn(
+            r'\n[ \t]*cd susfs4ksu\n[ \t]*COMMIT1=.*?'
+            r'[ \t]*git cherry-pick "\$COMMIT2"\n',
+            '\n',
+            source,
+            count=1,
+            flags=re.DOTALL,
+        )
+        if count not in (0, 1):
+            raise SystemExit("Unexpected number of SUSFS cherry-pick blocks")
+        if "COMMIT1=" in source or "git cherry-pick" in source:
+            raise SystemExit("Obsolete SUSFS cherry-pick logic is still present")
+        if dev_branch not in source:
+            raise SystemExit("Could not select the Pershoot SUSFS dev branch")
+        if "https://gitlab.com/pershoot/susfs4ksu.git" not in source:
+            raise SystemExit("Could not select the Pershoot SUSFS repository")
+
+        path.write_text(source, encoding="utf-8")
+        print("SUSFS action now follows pershoot/gki-android14-6.1-dev directly")
+        PY
 
     - name: Setup SUSFS
       uses: ./.github/actions/susfs
