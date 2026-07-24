@@ -1,4 +1,4 @@
-name: Build latest TheWildJames AX88179B (No SUSFS)
+name: Build latest TheWildJames AX88179B
 permissions:
   contents: write
   actions: write
@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-gki:
-    name: "6.1.145-android14-2025-09-TheWildJames + AX88179B (No SUSFS)"
+    name: "6.1.145-android14-2025-09-TheWildJames + AX88179B"
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -112,6 +112,17 @@ jobs:
 
     - name: Setup KernelSU-Next
       uses: ./.github/actions/kernelsu
+      with:
+        ksu_branch: dev-susfs
+
+    - name: Setup SUSFS
+      uses: ./.github/actions/susfs
+      with:
+        version: android14-6.1
+        android_version: android14
+        kernel_version: "6.1"
+        os_patch_level: "2025-09"
+        sublevel: ${{ steps.extract.outputs.sublevel }}
 
     - name: Baseband Guard
       uses: ./.github/actions/bbg
@@ -463,7 +474,7 @@ jobs:
           fi
           echo "| **KSU Version** | ${KSU_VER} |"
           echo "| **KSU Tag** | ${KSU_TAG} |"
-          echo "| **Feature Set** | KSUN+BBG+NET+DS |"
+          echo "| **Feature Set** | KSUN+SUSFS+BBG+NET+DS |"
           echo "| **Variant** | TheWildJames |"
           echo
           
@@ -487,7 +498,7 @@ jobs:
     - name: Upload Artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.extract.outputs.file_name }}-AX88179B-NoSUSFS-AnyKernel3
+        name: ${{ steps.extract.outputs.file_name }}-AX88179B-AnyKernel3
         path: ${{ github.workspace }}/AnyKernel3/**
         if-no-files-found: ignore
         compression-level: 9
