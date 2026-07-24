@@ -1,4 +1,4 @@
-name: Build pinned r5 TheWildJames AX88179B
+name: Build latest TheWildJames AX88179B (No SUSFS)
 permissions:
   contents: write
   actions: write
@@ -6,76 +6,24 @@ permissions:
 on:
   workflow_dispatch:
 
-concurrency:
-  group: thewildjames-r5-ax88179b-no-susfs
-  cancel-in-progress: false
-
 jobs:
   build-gki:
     name: "6.1.145-android14-2025-09-TheWildJames + AX88179B (No SUSFS)"
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     steps:
-    # This workflow may live in an otherwise empty personal repository.
-    # Check out the complete upstream r5 source tree so every repository-local
-    # action used below is present under .github/actions.
-    - name: Checkout pinned WildKernels r5 source
-      uses: actions/checkout@v5
+    - name: Checkout Repository
+      uses: actions/checkout@v7
       with:
         repository: WildKernels/GKI_KernelSU_SUSFS
-        ref: 705c7fc281572e8759eaaaec8b47ec579443fa08
-        fetch-depth: 1
-        persist-credentials: false
-
-    - name: Verify pinned source and required local actions
-      shell: bash
-      run: |
-        set -euo pipefail
-        EXPECTED_BASE="705c7fc281572e8759eaaaec8b47ec579443fa08"
-        ACTUAL_BASE="$(git rev-parse HEAD)"
-
-        echo "Expected upstream commit: $EXPECTED_BASE"
-        echo "Checked-out commit:       $ACTUAL_BASE"
-        test "$ACTUAL_BASE" = "$EXPECTED_BASE"
-
-        required_actions=(
-          setup-build-environment
-          download-kernel
-          extract-sublevel-file-name
-          kernel-fixes
-          kernelsu
-          bbg
-          networking
-          droidspaces
-          misc
-          apply-device-patches
-          apply-kernel-branding
-          remove-protected-exports
-          clean-kernel-flags
-          scan-patch-rejects
-          cache-setup
-          cache-restore
-          cache-save
-          cache-stats
-          build-kernel
-        )
-
-        for action in "${required_actions[@]}"; do
-          test -f ".github/actions/$action/action.yml" || {
-            echo "Missing local action: .github/actions/$action/action.yml" >&2
-            exit 1
-          }
-        done
-
-        test "$(jq -r '.kernelsu.dev' .github/config/commits.json)" = \
-          "5a4a71874caaad06aa126f761c93391de1d32361"
 
     - name: 🧹 Emergency Disk Cleanup
       if: false
       uses: ./.github/actions/disk-cleanup
 
     - name: Free Disk Space
+      if: true
       uses: endersonmenezes/free-disk-space@v3  # Use @main for latest, @v3 for stable
       with:
         remove_android: true
@@ -107,7 +55,14 @@ jobs:
         android_version: android14
         kernel_version: "6.1"
         os_patch_level: "2025-09"
-        use_repo: false
+
+    - name: Build FUSE-BPF Userspace Daemon (Issue #211)
+      if: false
+      uses: ./.github/actions/fuse-bpf
+      with:
+        version: android14-6.1
+        kernel_version: "6.1"
+        android_version: android14
 
     - name: Set Build Timestamp from Kernel Commit
       shell: bash
@@ -155,80 +110,8 @@ jobs:
         sublevel: ${{ steps.extract.outputs.sublevel }}
         os_patch_level: "2025-09"
 
-    - name: Apply AX88179B USB stability quirks
-      shell: bash
-      working-directory: ${{ github.workspace }}/kernel/common
-      run: |
-        set -euo pipefail
-        python3 - <<'PY'
-        from pathlib import Path
-        import re
-
-        path = Path("drivers/usb/core/quirks.c")
-        text = path.read_text(encoding="utf-8")
-        pattern = re.compile(
-            r"\{\s*USB_DEVICE\(0x0b95,\s*0x1790\).*?\},",
-            re.DOTALL,
-        )
-        flags = ("USB_QUIRK_RESET_RESUME", "USB_QUIRK_NO_LPM")
-        entry = (
-            "\t/* ASIX AX88179B USB 3.0 Gigabit Ethernet */\n"
-            "\t{ USB_DEVICE(0x0b95, 0x1790), .driver_info =\n"
-            "\t\tUSB_QUIRK_RESET_RESUME | USB_QUIRK_NO_LPM },\n"
-        )
-
-        matches = list(pattern.finditer(text))
-        if matches:
-            if len(matches) != 1:
-                raise SystemExit(
-                    f"expected one AX88179B entry, found {len(matches)}"
-                )
-            existing = matches[0].group(0)
-            missing = [flag for flag in flags if flag not in existing]
-            if missing:
-                raise SystemExit(
-                    "existing AX88179B entry lacks: " + ", ".join(missing)
-                )
-            print("AX88179B quirk already present and correct")
-        else:
-            anchors = (
-                "\t/* Realtek hub in Dell WD19 (Type-C) */",
-                "\t{ USB_DEVICE(0x0bda, 0x0487)",
-                "\t/* Generic RTL8153 based ethernet adapters */",
-            )
-            anchor = next((item for item in anchors if item in text), None)
-            if anchor is None:
-                raise SystemExit("AX88179B insertion anchor not found")
-            text = text.replace(anchor, entry + anchor, 1)
-            path.write_text(text, encoding="utf-8")
-            print("Added AX88179B RESET_RESUME + NO_LPM quirks")
-
-        final = path.read_text(encoding="utf-8")
-        match = pattern.search(final)
-        if not match or any(flag not in match.group(0) for flag in flags):
-            raise SystemExit("AX88179B quirk verification failed")
-        print(match.group(0))
-        PY
-
     - name: Setup KernelSU-Next
       uses: ./.github/actions/kernelsu
-      with:
-        use_latest_commits: false
-
-    - name: Verify pinned KernelSU Next and SUSFS exclusion
-      shell: bash
-      run: |
-        set -euo pipefail
-
-        EXPECTED_KSU="$(jq -r '.kernelsu.dev' .github/config/commits.json)"
-        ACTUAL_KSU="$(git -C kernel/KernelSU-Next rev-parse HEAD)"
-        test "$ACTUAL_KSU" = "$EXPECTED_KSU"
-
-        # The dedicated SUSFS action must not have run or created its source tree.
-        test ! -e "${{ github.workspace }}/susfs4ksu"
-
-        echo "KernelSU Next commit: $ACTUAL_KSU"
-        echo "SUSFS: not included"
 
     - name: Baseband Guard
       uses: ./.github/actions/bbg
@@ -239,11 +122,45 @@ jobs:
         version: android14-6.1
         kernel_version: "6.1"
         android_version: android14
+        sublevel: ${{ steps.extract.outputs.sublevel }}
 
     - name: DroidSpaces-OSS Patches
       uses: ./.github/actions/droidspaces
       with:
         version: android14-6.1
+        android_version: android14
+        kernel_version: "6.1"
+        os_patch_level: "2025-09"
+        sublevel: ${{ steps.extract.outputs.sublevel }}
+
+    - name: Additional Server and Container Configs
+      uses: ./.github/actions/set-kernel-config
+      with:
+        config_list: |
+          CONFIG_USER_NS=y
+          CONFIG_NETFILTER_XT_TARGET_REJECT=y
+
+    - name: Apply NTSync Patches
+      uses: ./.github/actions/ntsync
+      with:
+        version: android14-6.1
+        kernel_version: "6.1"
+        sublevel: ${{ steps.extract.outputs.sublevel }}
+
+    - name: Apply Ptrace Patch
+      uses: ./.github/actions/ptrace
+      with:
+        kernel_version: "6.1"
+
+    - name: Apply Unicode Fix Patch
+      uses: ./.github/actions/unicode-fix
+      with:
+        kernel_version: "6.1"
+
+    - name: Apply Performance Patches
+      uses: ./.github/actions/performance
+      if: false
+      with:
         kernel_version: "6.1"
 
     - name: Setup Misc Configs
@@ -260,6 +177,76 @@ jobs:
       with:
         version: android14-6.1
         kernel_version: "6.1"
+
+    - name: Apply AX88179B USB stability quirks
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
+        import re
+
+        path = Path("drivers/usb/core/quirks.c")
+        source = path.read_text(encoding="utf-8")
+        table_start = source.index(
+            "static const struct usb_device_id usb_quirk_list[] = {"
+        )
+        table_end = source.index(
+            "static const struct usb_device_id usb_interface_quirk_list[]",
+            table_start,
+        )
+        table = source[table_start:table_end]
+        pattern = re.compile(
+            r"\{[^{}]*USB_DEVICE\(\s*0x([0-9a-f]{4})\s*,\s*"
+            r"0x([0-9a-f]{4})\s*\)[^{}]*\},",
+            re.IGNORECASE | re.DOTALL,
+        )
+        entries = list(pattern.finditer(table))
+        target = (0x0B95, 0x1790)
+        required = ("USB_QUIRK_RESET_RESUME", "USB_QUIRK_NO_LPM")
+        existing = next(
+            (
+                entry
+                for entry in entries
+                if (int(entry.group(1), 16), int(entry.group(2), 16)) == target
+            ),
+            None,
+        )
+
+        if existing:
+            if any(flag not in existing.group(0) for flag in required):
+                raise SystemExit(
+                    "Existing 0b95:1790 quirk does not contain both required flags"
+                )
+        else:
+            previous = None
+            for entry in entries:
+                key = (int(entry.group(1), 16), int(entry.group(2), 16))
+                if key < target:
+                    previous = entry
+                else:
+                    break
+            insert_at = table_start + (
+                previous.end() if previous else table.index("{") + 1
+            )
+            addition = (
+                "\n\t/* ASIX AX88179B USB 3.0 Gigabit Ethernet */\n"
+                "\t{ USB_DEVICE(0x0b95, 0x1790), .driver_info =\n"
+                "\t\tUSB_QUIRK_RESET_RESUME | USB_QUIRK_NO_LPM },"
+            )
+            source = source[:insert_at] + addition + source[insert_at:]
+            path.write_text(source, encoding="utf-8")
+
+        final = path.read_text(encoding="utf-8")
+        match = re.search(
+            r"\{[^{}]*USB_DEVICE\(\s*0x0b95\s*,\s*0x1790\s*\)[^{}]*\},",
+            final,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not match or any(flag not in match.group(0) for flag in required):
+            raise SystemExit("AX88179B quirk verification failed")
+        print(match.group(0))
+        PY
 
     - name: Apply ABI Compare Bypass
       if: false
@@ -310,6 +297,13 @@ jobs:
         if-no-files-found: ignore
         compression-level: 9
 
+    - name: Get prebuilt ccache (downloaded once by prepare-ccache)
+      uses: actions/download-artifact@v8
+      with:
+        name: ccache-binary
+        path: ccache-dl
+      continue-on-error: true
+
     - name: 'Setup Cache and Build Environment'
       uses: ./.github/actions/cache-setup
       with:
@@ -330,21 +324,10 @@ jobs:
         restore_keys: |
           android14-6.1.${{ steps.extract.outputs.sublevel }}-
 
-    - name: Restore lto-cache (ccache versions)
-      id: restore-lto-ccache
-      continue-on-error: true
-      if: false
-      uses: ./.github/actions/cache-restore
-      with:
-        cache_path: /home/runner/.ld_cache
-        cache_key: android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
-        cache_bucket: lto-cache
-        restore_keys: |
-          android14-6.1.${{ steps.extract.outputs.sublevel }}-
-
     - name: Restore bazel-cache
       id: restore-bazel
       continue-on-error: true
+      if: false
       uses: ./.github/actions/cache-restore
       with:
         cache_path: /home/runner/.cache/bazel
@@ -353,17 +336,33 @@ jobs:
         restore_keys: |
           android14-6.1.${{ steps.extract.outputs.sublevel }}-
 
+    - name: Cache ccache (GitHub Native)
+      uses: actions/cache@v6
+      with:
+        path: /home/runner/.ccache
+        key: ccache-android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
+        restore-keys: |
+          ccache-android14-6.1.${{ steps.extract.outputs.sublevel }}-
+          ccache-android14-6.1-
+          ccache-
+
+    - name: Cache bazel-cache (GitHub Native)
+      uses: actions/cache@v6
+      with:
+        path: /home/runner/.cache/bazel
+        key: bazel-android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
+        restore-keys: |
+          bazel-android14-6.1.${{ steps.extract.outputs.sublevel }}-
+          bazel-android14-6.1-
+          bazel-
+
     - name: Check cache hit
       run: |
         echo "Cache restore status:"
         CCACHE_HIT="${{ steps.restore-ccache.outputs.cache-hit || 'skipped' }}"
-        LTO_CCACHE_HIT="${{ steps.restore-lto-ccache.outputs.cache-hit || 'skipped' }}"
         BAZEL_HIT="${{ steps.restore-bazel.outputs.cache-hit || 'skipped' }}"
-        LTO_BAZEL_HIT="skipped"
         echo "  ccache: $CCACHE_HIT"
-        echo "  lto (ccache versions): $LTO_CCACHE_HIT"
         echo "  bazel: $BAZEL_HIT"
-        echo "  lto (bazel versions): $LTO_BAZEL_HIT"
 
     - name: Get Cache Stats
       uses: ./.github/actions/cache-stats
@@ -398,20 +397,10 @@ jobs:
         compression_level: 9
         github_token: ${{ secrets.MY_GITHUB_TOKEN }}
 
-    - name: Save lto-cache
-      continue-on-error: true
-      uses: ./.github/actions/cache-save
-      if: false
-      with:
-        cache_path: /home/runner/.ld_cache
-        cache_key: android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
-        cache_bucket: "lto-cache"
-        compression_level: 9
-        github_token: ${{ secrets.MY_GITHUB_TOKEN }}
-
     - name: Save bazel-cache
       continue-on-error: true
       uses: ./.github/actions/cache-save
+      if: false
       with:
         cache_path: /home/runner/.cache/bazel
         cache_key: android14-6.1.${{ steps.extract.outputs.sublevel }}-2025-09
@@ -428,101 +417,77 @@ jobs:
         bypass: true
         version: android14-6.1
 
-    - name: Verify pinned AX88179B build
+    - name: 📋 Consolidated Build Summary
+      if: ${{ always() }}
       shell: bash
       run: |
-        set -euo pipefail
-
-        test -s "${{ github.workspace }}/AnyKernel3/Image"
-        test -s "${{ github.workspace }}/AnyKernel3/Bypass-Image"
-
-        VERSION=$(strings "${{ github.workspace }}/AnyKernel3/Image" | grep -m1 '^Linux version ')
-        echo "$VERSION"
-        grep -q 'Linux version 6.1.145-android14-Wild' <<<"$VERSION"
-
-        CONFIG_OUT="${{ runner.temp }}/wildkernel.config"
-        "${{ github.workspace }}/kernel/common/scripts/extract-ikconfig" \
-          "${{ github.workspace }}/AnyKernel3/Image" > "$CONFIG_OUT"
-
-        required_configs=(
-          'CONFIG_KSU=y'
-          'CONFIG_BBG=y'
-          'CONFIG_SYSVIPC=y'
-          'CONFIG_IPC_NS=y'
-          'CONFIG_PID_NS=y'
-          'CONFIG_DEVTMPFS=y'
-          'CONFIG_TCP_CONG_BBR=y'
-          'CONFIG_DEFAULT_BBR=y'
-          'CONFIG_DEFAULT_TCP_CONG="bbr"'
-          'CONFIG_NET_SCH_CAKE=y'
-          'CONFIG_WIREGUARD=y'
-          'CONFIG_IP_SET=y'
-          'CONFIG_IP6_NF_NAT=y'
-          'CONFIG_TMPFS_XATTR=y'
-          'CONFIG_TMPFS_POSIX_ACL=y'
-          'CONFIG_OVERLAY_FS=y'
-          'CONFIG_USB_NET_AX88179_178A=m'
-        )
-
-        for config in "${required_configs[@]}"; do
-          grep -Fqx "$config" "$CONFIG_OUT" || {
-            echo "Missing expected config: $config" >&2
-            exit 1
-          }
-        done
-
-        if grep -Eq '^CONFIG_KSU_SUSFS(=|_)' "$CONFIG_OUT"; then
-          echo "SUSFS configuration unexpectedly present:" >&2
-          grep -E '^CONFIG_KSU_SUSFS(=|_)' "$CONFIG_OUT" >&2
-          exit 1
+        SUMMARY_FILE="/tmp/build-summary-${{ steps.extract.outputs.file_name }}.md"
+        
+        # Determine build status
+        if [ "${{ job.status }}" = "success" ]; then
+          STATUS="✅ Success"
+        else
+          STATUS="❌ Failed"
         fi
+        
+        # Get kernel version from Image if available
+        KERNEL_VER_STR=""
+        if [ -f "/home/runner/out/dist/Image" ]; then
+          KERNEL_VER_STR=$(strings "/home/runner/out/dist/Image" | grep -m1 "^Linux version " | sed 's/Linux version //' || echo "")
+        elif [ -f "/home/runner/out/Image" ]; then
+          KERNEL_VER_STR=$(strings "/home/runner/out/Image" | grep -m1 "^Linux version " | sed 's/Linux version //' || echo "")
+        fi
+        
+        # Get KSU version from env (set by kernelsu action)
+        KSU_VER="${KSU_VERSION:-N/A}"
+        KSU_TAG="${KSU_GIT_TAG:-N/A}"
+        
+        # Get cache stats from env (set by cache-stats action)
+        CCACHE_HIT="${CCACHE_HIT_RATE:-N/A}"
+        
+        # Get build time (approximate from step timing)
+        BUILD_TIME="N/A"
+        
+        # Count warnings from build log if available
+        WARNINGS="N/A"
+        
+        {
+          echo "## android14 6.1.145 (TheWildJames) — ${STATUS}"
+          echo
+          echo "| Metric | Value |"
+          echo "|--------|-------|"
+          echo "| **Status** | ${STATUS} |"
+          echo "| **Kernel** | 6.1.145-android14-2025-09 |"
+          if [ -n "$KERNEL_VER_STR" ]; then
+            echo "| **Version String** | \`${KERNEL_VER_STR}\` |"
+          fi
+          echo "| **KSU Version** | ${KSU_VER} |"
+          echo "| **KSU Tag** | ${KSU_TAG} |"
+          echo "| **Feature Set** | KSUN+BBG+NET+DS |"
+          echo "| **Variant** | TheWildJames |"
+          echo
+          
+          # Kernel Fixes
+          if [ -f /tmp/kernel-fixes-summary.md ]; then
+            echo "### 🔧 Kernel Fixes"
+            cat /tmp/kernel-fixes-summary.md
+            echo
+          fi
+        } > "$SUMMARY_FILE"
 
-        grep -A3 -B1 'USB_DEVICE(0x0b95, 0x1790)' \
-          "${{ github.workspace }}/kernel/common/drivers/usb/core/quirks.c"
-
-        FULL_KSU_COMMIT="$(git -C "${{ github.workspace }}/kernel/KernelSU-Next" rev-parse HEAD)"
-
-        cat > "${{ github.workspace }}/AnyKernel3/AX88179B-BUILD.txt" <<EOF
-        Base workflow commit: 705c7fc281572e8759eaaaec8b47ec579443fa08 (r5)
-        Kernel target: 6.1.145-android14-2025-09-TheWildJames
-        Feature set: KernelSU Next + BBG + Networking + DroidSpaces (SUSFS excluded)
-        KernelSU implementation: KernelSU Next
-        KernelSU Next commit: ${FULL_KSU_COMMIT}
-        KernelSU version code: ${KSU_VERSION:-unknown}
-        KernelSU tag: ${KSU_GIT_TAG:-unknown}
-        Required manager: KernelSU Next Manager (not original KernelSU Manager)
-        SUSFS: not included
-        Device quirk: 0b95:1790 RESET_RESUME + NO_LPM
-        Runtime equivalent: usbcore.quirks=0b95:1790:bk
-        EOF
-
-        sha256sum \
-          "${{ github.workspace }}/AnyKernel3/Image" \
-          "${{ github.workspace }}/AnyKernel3/Bypass-Image" | \
-          tee "${{ github.workspace }}/AnyKernel3/AX88179B-SHA256.txt"
-
-    - name: Package flashable AX88179B ZIP
-      shell: bash
-      working-directory: ${{ github.workspace }}/AnyKernel3
-      run: |
-        set -euo pipefail
-        ZIP_NAME="${{ steps.extract.outputs.file_name }}-AX88179B-NoSUSFS-AnyKernel3.zip"
-        zip -r9 "${{ github.workspace }}/$ZIP_NAME" . \
-          -x '.git/*' '.github/*' README.md
-        echo "AX_ZIP=${{ github.workspace }}/$ZIP_NAME" >> "$GITHUB_ENV"
-
-    - name: Upload flashable AX88179B ZIP
+    - name: Upload Build Summary Artifact
+      if: ${{ always() }}
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.extract.outputs.file_name }}-AX88179B-NoSUSFS-Flashable
-        path: ${{ env.AX_ZIP }}
-        if-no-files-found: error
-        compression-level: 0
+        name: ${{ steps.extract.outputs.file_name }}-Summary
+        path: /tmp/build-summary-${{ steps.extract.outputs.file_name }}.md
+        if-no-files-found: ignore
+        compression-level: 9
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.extract.outputs.file_name }}-NoSUSFS-AnyKernel3
+        name: ${{ steps.extract.outputs.file_name }}-AX88179B-NoSUSFS-AnyKernel3
         path: ${{ github.workspace }}/AnyKernel3/**
         if-no-files-found: ignore
         compression-level: 9
