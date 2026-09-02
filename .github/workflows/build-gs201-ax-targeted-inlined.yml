@@ -369,9 +369,33 @@ jobs:
 
     - name: Setup swap for compilation
       if: steps.image-cache.outputs.cache-hit != 'true'
-      uses: thejerrybao/setup-swap-space@v1
-      with:
-        swap-size-gb: 16
+      shell: bash
+      run: |
+        set -euo pipefail
+        swap_file="$RUNNER_TEMP/kernel-build.swap"
+        swap_size_gib=16
+        swap_size_bytes=$((swap_size_gib * 1024 * 1024 * 1024))
+        available_bytes=$(df --output=avail -B1 "$RUNNER_TEMP" | tail -n 1)
+
+        if (( available_bytes < swap_size_bytes )); then
+          echo "Need ${swap_size_gib} GiB for swap; only ${available_bytes} bytes available" >&2
+          exit 1
+        fi
+
+        cleanup_failed_swap() {
+          sudo swapoff "$swap_file" 2>/dev/null || true
+          sudo rm -f "$swap_file"
+        }
+        trap cleanup_failed_swap ERR
+
+        sudo fallocate -l "${swap_size_gib}G" "$swap_file"
+        sudo chmod 600 "$swap_file"
+        sudo mkswap "$swap_file"
+        sudo swapon "$swap_file"
+        swapon --show
+        free -h
+
+        trap - ERR
 
     - name: Build normal kernel Image
       if: steps.image-cache.outputs.cache-hit != 'true'
