@@ -324,7 +324,6 @@ jobs:
 
         {
           echo "recipe=${BUILD_RECIPE_ID}"
-          echo "integration=$(git -C build-assets rev-parse HEAD)"
           echo "wildkernels=$(git rev-parse HEAD)"
           echo "kernel=$(git -C kernel/common rev-parse HEAD)"
           echo "ksu=$(git -C kernel/KernelSU-Next rev-parse HEAD)"
