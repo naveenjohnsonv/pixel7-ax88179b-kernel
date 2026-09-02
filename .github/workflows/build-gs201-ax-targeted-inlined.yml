@@ -478,6 +478,47 @@ jobs:
         path: ${{ github.workspace }}/compiled-output
         key: kernel-inline-output-v4-${{ steps.fingerprint.outputs.value }}
 
+    - name: Create flashable AnyKernel3 ZIP
+      shell: bash
+      run: |
+        set -euo pipefail
+        anykernel="${{ github.workspace }}/AnyKernel3"
+        release="${{ github.workspace }}/release"
+        package_name="${{ steps.extract.outputs.file_name }}-AX88179B-INLINE-AnyKernel3.zip"
+        package="$release/$package_name"
+        mkdir -p "$release"
+
+        test -s "$anykernel/Image"
+        test -s "$anykernel/anykernel.sh"
+        test -s "$anykernel/META-INF/com/google/android/update-binary"
+        test -s "$anykernel/tools/ak3-core.sh"
+        test -s "$anykernel/tools/magiskboot"
+        rm -f "$package" "$package.sha256"
+
+        (
+          cd "$anykernel"
+          zip -r -q -9 "$package" . \
+            -x '.git' '.git/*' '.github' '.github/*' \
+               '.gitattributes' '.gitignore'
+        )
+
+        unzip -tq "$package"
+        package_files="$(zipinfo -1 "$package")"
+        grep -Fxq 'Image' <<< "$package_files"
+        grep -Fxq 'anykernel.sh' <<< "$package_files"
+        grep -Fxq 'META-INF/com/google/android/update-binary' \
+          <<< "$package_files"
+        grep -Fxq 'tools/ak3-core.sh' <<< "$package_files"
+        grep -Fxq 'tools/magiskboot' <<< "$package_files"
+        ! grep -Eq '^\.(git|github)(/|$)' <<< "$package_files"
+        unzip -p "$package" anykernel.sh | grep -Fq 'block=boot'
+
+        (
+          cd "$release"
+          sha256sum "$package_name" > "$package_name.sha256"
+        )
+        cat "$package.sha256"
+
     - name: Preserve resolved source and integration evidence
       shell: bash
       run: |
@@ -495,6 +536,7 @@ jobs:
           echo "ksu $(git -C kernel/KernelSU-Next rev-parse HEAD)"
           echo "susfs $(git -C susfs4ksu rev-parse HEAD)"
           echo "asix $(git -C asix-usb-nic-linux-driver rev-parse HEAD)"
+          echo "anykernel $(git -C AnyKernel3 rev-parse HEAD)"
           echo "droidspaces $(git -C Droidspaces-OSS rev-parse HEAD)"
           echo "bbg ${BBG_COMMIT:-unknown}"
           echo "fingerprint ${{ steps.fingerprint.outputs.value }}"
@@ -519,13 +561,16 @@ jobs:
           > "$evidence/mii-modinfo.txt"
         modinfo "${{ github.workspace }}/compiled-output/ax88179_178a.ko" \
           > "$evidence/stock-ax88179-modinfo.txt"
+        cp "${{ github.workspace }}"/release/*.sha256 "$evidence/"
         git -C "$kernel_tree" status --short > "$evidence/kernel-status.txt"
 
-    - name: Upload raw Image for review only
+    - name: Upload flashable AnyKernel3 ZIP
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.extract.outputs.file_name }}-AX88179B-INLINE-NO-FLASH
-        path: ${{ github.workspace }}/AnyKernel3/Image
+        name: ${{ steps.extract.outputs.file_name }}-AX88179B-INLINE-AnyKernel3
+        path: |
+          ${{ github.workspace }}/release/*.zip
+          ${{ github.workspace }}/release/*.zip.sha256
         if-no-files-found: error
         compression-level: 0
         retention-days: 14
