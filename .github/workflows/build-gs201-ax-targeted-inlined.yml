@@ -1,4 +1,4 @@
-name: Build TheWildJames AX88179B fully inlined + SUSFS
+name: Build GS201 with inline AX88179B and xHCI fix
 
 permissions:
   contents: read
@@ -7,39 +7,39 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: thewildjames-ax88179b-inline-susfs
+  group: gs201-ax88179b-inline
   cancel-in-progress: true
 
 jobs:
   build-gki:
-    name: "6.1.145-android14-2025-09-TheWildJames + AX88179B INLINE + SUSFS"
+    name: "GS201 GKI + inline ASIX 4.1.0 + XHCI_NO_SOFT_RETRY"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
-    # Keep stable for packaging/validation-only edits; bump for build-affecting changes.
     env:
-      BUILD_RECIPE_ID: eb452ad731078dfe24c3c5f16bf3f08943dc724c
+      BUILD_RECIPE_ID: inline-asix-v2-xhci-nsr-cred-fix
+
     steps:
-    - name: Checkout Repository
+    - name: Checkout current WildKernels recipe
       uses: actions/checkout@v7
       with:
         repository: WildKernels/GKI_KernelSU_SUSFS
         fetch-depth: 1
         persist-credentials: false
 
-    - name: Checkout inline integration assets
+    - name: Checkout this integration recipe
       uses: actions/checkout@v7
       with:
         path: build-assets
         fetch-depth: 1
         persist-credentials: false
 
-    - name: Setup Build Environment
+    - name: Setup build environment
       uses: ./.github/actions/setup-build-environment
       env:
         BOOT_SIGN_KEY: ${{ secrets.BOOT_SIGN_KEY }}
 
-    - name: Download Kernel Repository
+    - name: Download current Android 14 / 6.1 September 2025 kernel
       uses: ./.github/actions/download-kernel
       with:
         version: android14-6.1
@@ -47,17 +47,16 @@ jobs:
         kernel_version: "6.1"
         os_patch_level: "2025-09"
 
-    - name: Set Build Timestamp from Kernel Commit
+    - name: Set deterministic build timestamp
       shell: bash
       run: |
         set -euo pipefail
-
         echo "SOURCE_DATE_EPOCH=1757046000" >> "$GITHUB_ENV"
         echo "KBUILD_BUILD_TIMESTAMP=Fri Sep 05 04:20:00 UTC 2025" >> "$GITHUB_ENV"
         echo "GIT_COMMITTER_DATE=2025-09-05T04:20:00Z" >> "$GITHUB_ENV"
         echo "GIT_AUTHOR_DATE=2025-09-05T04:20:00Z" >> "$GITHUB_ENV"
 
-    - name: Extract Sublevel and Set File Name
+    - name: Extract kernel metadata
       id: extract
       uses: ./.github/actions/extract-sublevel-file-name
       with:
@@ -67,7 +66,7 @@ jobs:
         os_patch_level: "2025-09"
         variant: TheWildJames
 
-    - name: Kernel Fixes
+    - name: Apply upstream recipe kernel fixes
       uses: ./.github/actions/kernel-fixes
       with:
         version: android14-6.1
@@ -76,46 +75,40 @@ jobs:
         sublevel: ${{ steps.extract.outputs.sublevel }}
         os_patch_level: "2025-09"
 
-    - name: Setup KernelSU-Next (rolling dev-susfs)
+    - name: Clone and integrate current KernelSU-Next dev-susfs
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
         set -euo pipefail
-
         rm -rf KernelSU-Next
-        curl -LSs \
-          https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh \
-          | bash -s dev-susfs
+        git clone --quiet --depth=1 --branch dev-susfs --single-branch \
+          https://github.com/pershoot/KernelSU-Next.git KernelSU-Next
 
-        ksu_repo="$PWD/KernelSU-Next"
-        git -C "$ksu_repo" fetch --quiet --force origin \
-          +refs/heads/dev:refs/remotes/origin/dev \
-          +refs/heads/dev-susfs:refs/remotes/origin/dev-susfs \
-          --tags
-        git -C "$ksu_repo" checkout -B dev-susfs refs/remotes/origin/dev-susfs
+        ln -sfn ../../KernelSU-Next/kernel common/drivers/kernelsu
+        grep -q 'obj-$(CONFIG_KSU) += kernelsu/' common/drivers/Makefile || \
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> common/drivers/Makefile
+        grep -q 'source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig || \
+          sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
 
-        patch -d "$ksu_repo" -p1 --batch --forward \
+        patch -d KernelSU-Next -p1 --batch --forward \
           < "${{ github.workspace }}/.github/actions/kernelsu/patches/static.patch"
 
-    - name: Integrate SUSFS (rolling Android 14 / 6.1 dev)
+    - name: Clone and integrate current SUSFS Android 14 / 6.1 dev
       shell: bash
       run: |
         set -euo pipefail
-
         susfs_repo="${{ github.workspace }}/susfs4ksu"
         kernel_tree="${{ github.workspace }}/kernel/common"
         rm -rf "$susfs_repo"
-
         git clone --quiet --depth=1 --branch gki-android14-6.1-dev \
-          https://gitlab.com/pershoot/susfs4ksu.git \
-          "$susfs_repo"
+          --single-branch https://gitlab.com/pershoot/susfs4ksu.git "$susfs_repo"
 
         cp "$susfs_repo/kernel_patches/fs/"* "$kernel_tree/fs/"
         cp "$susfs_repo/kernel_patches/include/linux/"* "$kernel_tree/include/linux/"
         patch -d "$kernel_tree" -p1 --batch --forward \
           < "$susfs_repo/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
 
-    - name: Enable KernelSU and SUSFS configs
+    - name: Enable KernelSU and SUSFS
       uses: ./.github/actions/set-kernel-config
       with:
         config_list: |
@@ -131,10 +124,10 @@ jobs:
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
 
-    - name: Baseband Guard
+    - name: Setup Baseband Guard
       uses: ./.github/actions/bbg
 
-    - name: Setup Networking
+    - name: Setup networking
       uses: ./.github/actions/networking
       with:
         version: android14-6.1
@@ -142,7 +135,7 @@ jobs:
         android_version: android14
         sublevel: ${{ steps.extract.outputs.sublevel }}
 
-    - name: DroidSpaces-OSS Patches
+    - name: Apply DroidSpaces-OSS patches
       uses: ./.github/actions/droidspaces
       with:
         version: android14-6.1
@@ -151,31 +144,31 @@ jobs:
         os_patch_level: "2025-09"
         sublevel: ${{ steps.extract.outputs.sublevel }}
 
-    - name: Additional Server and Container Configs
+    - name: Enable server and container configs
       uses: ./.github/actions/set-kernel-config
       with:
         config_list: |
           CONFIG_USER_NS=y
           CONFIG_NETFILTER_XT_TARGET_REJECT=y
 
-    - name: Apply NTSync Patches
+    - name: Apply NTSync patches
       uses: ./.github/actions/ntsync
       with:
         version: android14-6.1
         kernel_version: "6.1"
         sublevel: ${{ steps.extract.outputs.sublevel }}
 
-    - name: Apply Ptrace Patch
+    - name: Apply ptrace patch
       uses: ./.github/actions/ptrace
       with:
         kernel_version: "6.1"
 
-    - name: Apply Unicode Fix Patch
+    - name: Apply Unicode fix
       uses: ./.github/actions/unicode-fix
       with:
         kernel_version: "6.1"
 
-    - name: Setup Misc Configs
+    - name: Setup miscellaneous configs
       uses: ./.github/actions/misc
       with:
         version: android14-6.1
@@ -184,62 +177,43 @@ jobs:
         sublevel: ${{ steps.extract.outputs.sublevel }}
         variant: TheWildJames
 
-    - name: Apply Device-Specific Patches
+    - name: Apply device-specific patches
       uses: ./.github/actions/apply-device-patches
       with:
         version: android14-6.1
         kernel_version: "6.1"
 
-    - name: Fetch pinned ASIX ax_usb_nic 4.1.0 source
+    - name: Clone current official ASIX driver
       shell: bash
       run: |
         set -euo pipefail
-
-        readonly ASIX_COMMIT=6887878a1c67cc24789f18e31b87db5116d7b6f7
         asix_repo="${{ github.workspace }}/asix-usb-nic-linux-driver"
         rm -rf "$asix_repo"
-        git init -q "$asix_repo"
-        git -C "$asix_repo" remote add origin \
-          https://github.com/ASIXElectronics/asix-usb-nic-linux-driver.git
-        git -C "$asix_repo" fetch --quiet --depth=1 origin "$ASIX_COMMIT"
-        git -C "$asix_repo" checkout --quiet --detach FETCH_HEAD
+        git clone --quiet --depth=1 \
+          https://github.com/ASIXElectronics/asix-usb-nic-linux-driver.git \
+          "$asix_repo"
 
-        actual="$(git -C "$asix_repo" rev-parse HEAD)"
-        test "$actual" = "$ASIX_COMMIT"
-        echo "Pinned ASIX source: $actual"
-
-    - name: Inline AX88179A/B vendor driver and kernel fixes
+    - name: Apply minimized inline ASIX and target fixes
       shell: bash
       run: |
         set -euo pipefail
-
         assets="${{ github.workspace }}/build-assets/inline-ax88179ab"
         kernel_tree="${{ github.workspace }}/kernel/common"
+        ksu_tree="${{ github.workspace }}/kernel/KernelSU-Next"
         asix_repo="${{ github.workspace }}/asix-usb-nic-linux-driver"
 
-        test -s "$assets/apply-inline-transform.py"
-        test -s "$assets/verify-inline-tree.sh"
-        test -s "$assets/verify-built-image.sh"
-
         python3 "$assets/apply-inline-transform.py" \
-          --kernel "$kernel_tree" \
-          --asix "$asix_repo" \
-          --usb-quirks keep-0x402 \
-          --runtime-pm pinned
+          --kernel "$kernel_tree" --asix "$asix_repo" --ksu "$ksu_tree"
 
-        bash "$assets/verify-inline-tree.sh" \
-          "$kernel_tree" keep-0x402 pinned
-
-    - name: Enable fully inlined AX88179A/B driver
+    - name: Enable built-in ASIX driver
       uses: ./.github/actions/set-kernel-config
       with:
         config_list: |
           CONFIG_USB_NET_DRIVERS=y
-          CONFIG_MII=y
+          CONFIG_MII=m
           CONFIG_USB_NET_AX_USB_NIC=y
-          CONFIG_USB_NET_AX_USB_NIC_PIN_RUNTIME_PM=y
 
-    - name: Apply Kernel Branding
+    - name: Apply kernel branding
       uses: ./.github/actions/apply-kernel-branding
       with:
         variant: TheWildJames
@@ -248,11 +222,89 @@ jobs:
         version: android14-6.1
         sublevel: ${{ steps.extract.outputs.sublevel }}
 
-    - name: Remove Protected Exports
+    - name: Remove protected exports required by upstream recipe
       uses: ./.github/actions/remove-protected-exports
 
-    - name: Clean Kernel Flags
+    - name: Clean kernel flags
       uses: ./.github/actions/clean-kernel-flags
+
+    - name: Verify final source tree
+      shell: bash
+      run: |
+        set -euo pipefail
+        kernel_tree="${{ github.workspace }}/kernel/common"
+        ksu_tree="${{ github.workspace }}/kernel/KernelSU-Next"
+        driver="$kernel_tree/drivers/net/usb/ax_usb_nic"
+
+        required_files=(
+          "$driver/ax_main.c"
+          "$driver/ax_main.h"
+          "$driver/ax88179_178a.c"
+          "$driver/ax88179a_772d.c"
+          "$driver/ax_mii_compat.c"
+          "$driver/ax_mii_compat.h"
+          "$driver/Makefile"
+        )
+        for path in "${required_files[@]}"; do
+          test -s "$path"
+        done
+
+        grep -Fq 'config USB_NET_AX_USB_NIC' \
+          "$kernel_tree/drivers/net/usb/Kconfig"
+        grep -Fq 'obj-$(CONFIG_USB_NET_AX_USB_NIC)' \
+          "$kernel_tree/drivers/net/usb/Makefile"
+        grep -Fq 'AX88179 handled by built-in ax_usb_nic' \
+          "$kernel_tree/drivers/net/usb/ax88179_178a.c"
+
+        grep -Fq 'AX_BCDDEVICE_ID_179A, ax88179a_info' "$driver/ax_main.c"
+        test "$(grep -Fc 'AX_BCDDEVICE_ID_179A, ax88179a_info' \
+          "$driver/ax_main.c")" -eq 1
+        grep -Fq 'min_t(int, desc->skb_num, remaining)' "$driver/ax_main.c"
+        grep -Fq 'napi_complete_done(tx_napi, work_done)' "$driver/ax_main.c"
+        grep -Fq 'usb_deregister_device_driver(&ax_usb_config_driver);' \
+          "$driver/ax_main.c"
+        grep -Fq '#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)' \
+          "$driver/ax_main.h"
+        grep -Fq 'ax_mii_ethtool_get_link_ksettings' \
+          "$driver/ax_mii_compat.c"
+        grep -Fq 'ax_generic_mii_ioctl' "$driver/ax_mii_compat.c"
+        grep -Fq 'ax_mii_compat.o' "$driver/Makefile"
+        ! grep -Fq 'EXPORT_SYMBOL(ax_' "$driver/ax_mii_compat.c"
+        ! grep -REq \
+          '\b(mii_nway_restart|mii_ethtool_gset|mii_ethtool_get_link_ksettings|mii_ethtool_sset|mii_ethtool_set_link_ksettings|generic_mii_ioctl)\(' \
+          "$driver/ax_main.c" "$driver/ax88179_178a.c" \
+          "$driver/ax88179a_772d.c"
+
+        grep -Fq 'xhci->quirks |= XHCI_NO_SOFT_RETRY;' \
+          "$kernel_tree/drivers/usb/host/xhci.c"
+        grep -Fq '"xhci-hcd-exynos."' \
+          "$kernel_tree/drivers/usb/host/xhci.c"
+        grep -Fq 'is_init(current_cred())' \
+          "$ksu_tree/kernel/feature/sucompat.c"
+        ! grep -Fq 'is_init(get_current_cred())' \
+          "$ksu_tree/kernel/feature/sucompat.c"
+
+        ! grep -RqF 'usb_prefer_ax88179ab_config1' \
+          "$kernel_tree/drivers/usb/core"
+        ! grep -RqF 'AX88179A/B runtime PM pinned active' "$driver"
+        ! grep -Fq 'CONFIG_USB_NET_AX_USB_NIC_PIN_RUNTIME_PM' \
+          "$kernel_tree/ax88179ab-inline.fragment"
+
+        grep -Fqx 'CONFIG_USB_NET_DRIVERS=y' \
+          "$kernel_tree/ax88179ab-inline.fragment"
+        grep -Fqx 'CONFIG_MII=m' "$kernel_tree/ax88179ab-inline.fragment"
+        grep -Fqx 'CONFIG_USB_NET_AX_USB_NIC=y' \
+          "$kernel_tree/ax88179ab-inline.fragment"
+        grep -Fqx 'CONFIG_USB_NET_DRIVERS=y' \
+          "$kernel_tree/arch/arm64/configs/gki_defconfig"
+        grep -Fqx 'CONFIG_MII=m' \
+          "$kernel_tree/arch/arm64/configs/gki_defconfig"
+        grep -Fqx 'CONFIG_USB_NET_AX_USB_NIC=y' \
+          "$kernel_tree/arch/arm64/configs/gki_defconfig"
+
+        git -C "$kernel_tree" diff --check
+        git -C "$ksu_tree" diff --check
+        echo 'inline tree verification passed'
 
     - name: Initialize Bazel cache and config fragment
       shell: bash
@@ -260,11 +312,9 @@ jobs:
         set -euo pipefail
         mkdir -p /home/runner/.cache/bazel
         touch "${{ github.workspace }}/wild_gki.fragment"
-        # Bazel uses its hermetic JDK; an inherited JRE-only JAVA_HOME produced
-        # a warning in the previous run.
         echo "JAVA_HOME=" >> "$GITHUB_ENV"
 
-    - name: Compute exact build fingerprint
+    - name: Compute resolved-source build fingerprint
       id: fingerprint
       shell: bash
       run: |
@@ -273,14 +323,18 @@ jobs:
         trap 'rm -f "$manifest"' EXIT
 
         {
-          echo "workflow=${BUILD_RECIPE_ID}"
+          echo "recipe=${BUILD_RECIPE_ID}"
+          echo "integration=$(git -C build-assets rev-parse HEAD)"
           echo "wildkernels=$(git rev-parse HEAD)"
           echo "kernel=$(git -C kernel/common rev-parse HEAD)"
           echo "ksu=$(git -C kernel/KernelSU-Next rev-parse HEAD)"
           echo "susfs=$(git -C susfs4ksu rev-parse HEAD)"
+          echo "asix=$(git -C asix-usb-nic-linux-driver rev-parse HEAD)"
+          echo "droidspaces=$(git -C Droidspaces-OSS rev-parse HEAD)"
           echo "bbg=${BBG_COMMIT:-unknown}"
           echo "target=android14-6.1.145-2025-09-TheWildJames"
           git -C kernel/common diff --binary --no-ext-diff HEAD
+          git -C kernel/KernelSU-Next diff --binary --no-ext-diff HEAD
           while IFS= read -r -d '' file; do
             printf 'untracked=%s\n' "$file"
             sha256sum "kernel/common/$file"
@@ -291,14 +345,14 @@ jobs:
         echo "value=$fingerprint" >> "$GITHUB_OUTPUT"
         echo "Build fingerprint: $fingerprint"
 
-    - name: Restore exact compiled images
+    - name: Restore exact verified build outputs
       id: image-cache
       uses: actions/cache/restore@v6
       with:
-        path: ${{ github.workspace }}/.kernel-image-cache
-        key: kernel-images-v2-${{ steps.fingerprint.outputs.value }}
+        path: ${{ github.workspace }}/compiled-output
+        key: kernel-inline-output-v4-${{ steps.fingerprint.outputs.value }}
 
-    - name: Full disk cleanup for compilation
+    - name: Free disk space for compilation
       if: steps.image-cache.outputs.cache-hit != 'true'
       uses: endersonmenezes/free-disk-space@v3
       with:
@@ -319,7 +373,7 @@ jobs:
       with:
         swap-size-gb: 16
 
-    - name: Build Normal Kernel
+    - name: Build normal kernel Image
       if: steps.image-cache.outputs.cache-hit != 'true'
       env:
         SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
@@ -330,109 +384,129 @@ jobs:
         version: android14-6.1
         bypass: false
 
-    - name: Build Bypass Kernel
+    - name: Stage freshly compiled outputs
       if: steps.image-cache.outputs.cache-hit != 'true'
-      env:
-        SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
-        KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
-        JAVA_HOME: ""
-      uses: ./.github/actions/build-kernel
-      with:
-        bypass: true
-        version: android14-6.1
+      shell: bash
+      run: |
+        set -euo pipefail
+        source_dir="${{ github.workspace }}/kernel/bazel-bin/common/kernel_aarch64"
+        output_dir="${{ github.workspace }}/compiled-output"
+        mkdir -p "$output_dir"
+        cp "${{ github.workspace }}/AnyKernel3/Image" "$output_dir/Image"
+        cp "$source_dir/mii.ko" "$output_dir/mii.ko"
+        cp "$source_dir/ax88179_178a.ko" "$output_dir/ax88179_178a.ko"
+        cp "$source_dir/System.map" "$output_dir/System.map"
 
-    - name: Restore cached images into AnyKernel3
+    - name: Restore cached Image into build output
       if: steps.image-cache.outputs.cache-hit == 'true'
       shell: bash
       run: |
         set -euo pipefail
-        cp "${{ github.workspace }}/.kernel-image-cache/Image" \
-           "${{ github.workspace }}/AnyKernel3/Image"
-        cp "${{ github.workspace }}/.kernel-image-cache/Bypass-Image" \
-           "${{ github.workspace }}/AnyKernel3/Bypass-Image"
+        cp "${{ github.workspace }}/compiled-output/Image" \
+          "${{ github.workspace }}/AnyKernel3/Image"
 
-        bypass_patch="${{ github.workspace }}/.github/actions/build-kernel/patches/bypass.patch"
-        if patch -d "${{ github.workspace }}/AnyKernel3" -p1 --dry-run --batch \
-             < "$bypass_patch" >/dev/null; then
-          patch -d "${{ github.workspace }}/AnyKernel3" -p1 --batch \
-             < "$bypass_patch"
-        elif patch -d "${{ github.workspace }}/AnyKernel3" -R -p1 --dry-run --batch \
-             < "$bypass_patch" >/dev/null; then
-          echo "AnyKernel3 bypass support already present"
-        else
-          echo "::error title=AnyKernel3 validation failed::Unable to apply bypass support"
-          exit 1
-        fi
-    - name: Ensure kernel images exist
-      shell: bash
-      run: "set -euo pipefail\n\ntest -s \"${{ github.workspace }}/AnyKernel3/Image\"\ntest -s \"${{ github.workspace }}/AnyKernel3/Bypass-Image\"\n"
-
-    - name: Verify inlined driver in compiled images
+    - name: Verify compiled Image
       shell: bash
       run: |
         set -euo pipefail
-
-        verifier="${{ github.workspace }}/build-assets/inline-ax88179ab/verify-built-image.sh"
         kernel_tree="${{ github.workspace }}/kernel/common"
-        bash "$verifier" "$kernel_tree" "${{ github.workspace }}/AnyKernel3/Image"
-        bash "$verifier" "$kernel_tree" "${{ github.workspace }}/AnyKernel3/Bypass-Image"
+        image="${{ github.workspace }}/AnyKernel3/Image"
+        output_dir="${{ github.workspace }}/compiled-output"
+        config="$(mktemp)"
+        image_strings="$(mktemp)"
+        trap 'rm -f "$config" "$image_strings"' EXIT
 
-    - name: Preserve inline integration evidence
-      shell: bash
-      run: |
-        set -euo pipefail
+        test -s "$image"
+        "$kernel_tree/scripts/extract-ikconfig" "$image" > "$config"
+        grep -Fqx 'CONFIG_USB_NET_DRIVERS=y' "$config"
+        grep -Fqx 'CONFIG_MII=m' "$config"
+        grep -Fqx 'CONFIG_USB_NET_AX_USB_NIC=y' "$config"
+        ! grep -Fq 'CONFIG_USB_NET_AX_USB_NIC_PIN_RUNTIME_PM' "$config"
 
-        evidence="${{ github.workspace }}/inline-evidence"
-        kernel_tree="${{ github.workspace }}/kernel/common"
-        assets="${{ github.workspace }}/build-assets/inline-ax88179ab"
-        mkdir -p "$evidence"
+        strings "$image" > "$image_strings"
+        grep -Fq 'ASIX AX88179B_179A_772E_772D USB Ethernet Controller' \
+          "$image_strings"
+        grep -Fq 'ax_usb_nic' "$image_strings"
+        grep -Fq 'xhci-hcd-exynos.' "$image_strings"
+        ! grep -Fq 'AX88179A/B runtime PM pinned active' "$image_strings"
+        ! grep -Fq 'selecting ASIX AX88179A/B vendor configuration 1' \
+          "$image_strings"
 
-        git -C "$kernel_tree" diff --binary --no-ext-diff HEAD \
-          > "$evidence/ax88179ab-inline-kernel.diff"
-        cp "$kernel_tree/ax88179ab-inline.fragment" "$evidence/"
-        cp "$assets/apply-inline-transform.py" "$evidence/"
-        cp "$assets/verify-inline-tree.sh" "$evidence/"
-        cp "$assets/verify-built-image.sh" "$evidence/"
-        cp -a "$kernel_tree/drivers/net/usb/ax_usb_nic" \
-          "$evidence/ax_usb_nic-inline-source"
-        git -C "${{ github.workspace }}/asix-usb-nic-linux-driver" rev-parse HEAD \
-          > "$evidence/asix-source-commit.txt"
-        grep -E \
-          '^(CONFIG_USB_NET_DRIVERS|CONFIG_MII|CONFIG_USB_NET_AX_USB_NIC|CONFIG_USB_NET_AX_USB_NIC_PIN_RUNTIME_PM)=' \
-          "$kernel_tree/arch/arm64/configs/gki_defconfig" \
-          > "$evidence/inline-config.txt"
-        sha256sum \
-          "${{ github.workspace }}/AnyKernel3/Image" \
-          "${{ github.workspace }}/AnyKernel3/Bypass-Image" \
-          > "$evidence/image-sha256.txt"
-        git -C "$kernel_tree" status --short > "$evidence/kernel-status.txt"
+        mii_module="$output_dir/mii.ko"
+        stock_ax_module="$output_dir/ax88179_178a.ko"
+        system_map="$output_dir/System.map"
+        test -s "$mii_module"
+        test -s "$stock_ax_module"
+        test -s "$system_map"
+        modinfo "$mii_module" | grep -Eq '^name:[[:space:]]+mii$'
+        ! modinfo "$stock_ax_module" | \
+          grep -Eiq 'alias:.*v00000B95p00001790'
+        grep -Eq ' T ax_mii_nway_restart$' "$system_map"
+        grep -Eq ' T ax_generic_mii_ioctl$' "$system_map"
+        ! grep -Eq ' T (mii_nway_restart|generic_mii_ioctl)$' "$system_map"
 
-    - name: Stage compiled images for exact cache
-      if: steps.image-cache.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p "${{ github.workspace }}/.kernel-image-cache"
-        cp "${{ github.workspace }}/AnyKernel3/Image" \
-           "${{ github.workspace }}/.kernel-image-cache/Image"
-        cp "${{ github.workspace }}/AnyKernel3/Bypass-Image" \
-           "${{ github.workspace }}/.kernel-image-cache/Bypass-Image"
-    - name: Save compiled images
+        echo 'compiled outputs contain collision-free inline ASIX and Exynos xHCI fix'
+
+    - name: Save verified build outputs
       if: steps.image-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
-        path: ${{ github.workspace }}/.kernel-image-cache
-        key: kernel-images-v2-${{ steps.fingerprint.outputs.value }}
-    - name: Upload flashable AnyKernel3 package
+        path: ${{ github.workspace }}/compiled-output
+        key: kernel-inline-output-v4-${{ steps.fingerprint.outputs.value }}
+
+    - name: Preserve resolved source and integration evidence
+      shell: bash
+      run: |
+        set -euo pipefail
+        evidence="${{ github.workspace }}/inline-evidence"
+        kernel_tree="${{ github.workspace }}/kernel/common"
+        ksu_tree="${{ github.workspace }}/kernel/KernelSU-Next"
+        image="${{ github.workspace }}/AnyKernel3/Image"
+        mkdir -p "$evidence"
+
+        {
+          echo "integration $(git -C build-assets rev-parse HEAD)"
+          echo "wildkernels $(git rev-parse HEAD)"
+          echo "kernel $(git -C kernel/common rev-parse HEAD)"
+          echo "ksu $(git -C kernel/KernelSU-Next rev-parse HEAD)"
+          echo "susfs $(git -C susfs4ksu rev-parse HEAD)"
+          echo "asix $(git -C asix-usb-nic-linux-driver rev-parse HEAD)"
+          echo "droidspaces $(git -C Droidspaces-OSS rev-parse HEAD)"
+          echo "bbg ${BBG_COMMIT:-unknown}"
+          echo "fingerprint ${{ steps.fingerprint.outputs.value }}"
+        } > "$evidence/resolved-sources.txt"
+
+        git -C "$kernel_tree" diff --binary --no-ext-diff HEAD \
+          > "$evidence/kernel.diff"
+        git -C "$ksu_tree" diff --binary --no-ext-diff HEAD \
+          > "$evidence/kernelsu.diff"
+        cp "$kernel_tree/ax88179ab-inline.fragment" "$evidence/"
+        grep -E \
+          '^(CONFIG_USB_NET_DRIVERS|CONFIG_MII|CONFIG_USB_NET_AX_USB_NIC)=' \
+          "$kernel_tree/arch/arm64/configs/gki_defconfig" \
+          > "$evidence/inline-config.txt"
+        sha256sum \
+          "$image" \
+          "${{ github.workspace }}/compiled-output/mii.ko" \
+          "${{ github.workspace }}/compiled-output/ax88179_178a.ko" \
+          "${{ github.workspace }}/compiled-output/System.map" \
+          > "$evidence/compiled-output-sha256.txt"
+        modinfo "${{ github.workspace }}/compiled-output/mii.ko" \
+          > "$evidence/mii-modinfo.txt"
+        modinfo "${{ github.workspace }}/compiled-output/ax88179_178a.ko" \
+          > "$evidence/stock-ax88179-modinfo.txt"
+        git -C "$kernel_tree" status --short > "$evidence/kernel-status.txt"
+
+    - name: Upload raw Image for review only
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.extract.outputs.file_name }}-AX88179B-INLINE-SUSFS-AnyKernel3
-        path: ${{ github.workspace }}/AnyKernel3/**
+        name: ${{ steps.extract.outputs.file_name }}-AX88179B-INLINE-NO-FLASH
+        path: ${{ github.workspace }}/AnyKernel3/Image
         if-no-files-found: error
-        compression-level: 9
+        compression-level: 0
         retention-days: 14
 
-    - name: Upload inline integration evidence
+    - name: Upload integration evidence
       uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.extract.outputs.file_name }}-AX88179B-INLINE-evidence
