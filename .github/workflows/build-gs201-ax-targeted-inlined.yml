@@ -18,7 +18,7 @@ jobs:
 
     env:
       BUILD_RECIPE_ID: inline-asix-v2-xhci-nsr-cred-fix
-      BAZEL_CACHE_NAMESPACE: gs201-android14-6.1-kleaf-v1
+      KLEAF_CACHE_NAMESPACE: gs201-android14-6.1-kleaf-v1
 
     steps:
     - name: Checkout current WildKernels recipe
@@ -367,15 +367,15 @@ jobs:
         rmz_version: "3.1.1"
         testing: false
 
-    - name: Restore incremental Bazel disk cache
-      id: bazel-cache
+    - name: Restore incremental Kleaf output cache
+      id: kleaf-cache
       if: steps.image-cache.outputs.cache-hit != 'true'
       uses: actions/cache/restore@v6
       with:
-        path: /home/runner/.cache/bazel
-        key: bazel-disk-${{ env.BAZEL_CACHE_NAMESPACE }}-${{ runner.os }}-${{ steps.fingerprint.outputs.value }}
+        path: ${{ github.workspace }}/kernel/out/cache
+        key: kleaf-out-${{ env.KLEAF_CACHE_NAMESPACE }}-${{ runner.os }}-${{ steps.fingerprint.outputs.value }}
         restore-keys: |
-          bazel-disk-${{ env.BAZEL_CACHE_NAMESPACE }}-${{ runner.os }}-
+          kleaf-out-${{ env.KLEAF_CACHE_NAMESPACE }}-${{ runner.os }}-
 
     - name: Setup swap for compilation
       if: steps.image-cache.outputs.cache-hit != 'true'
@@ -594,18 +594,18 @@ jobs:
         compression-level: 9
         retention-days: 14
 
-    - name: Report incremental Bazel disk cache
+    - name: Report incremental Kleaf output cache
       if: steps.image-cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
         set -euo pipefail
-        cache_dir=/home/runner/.cache/bazel
+        cache_dir="${{ github.workspace }}/kernel/out/cache"
         test -d "$cache_dir"
         du -sh "$cache_dir"
 
-    - name: Save incremental Bazel disk cache
-      if: success() && steps.image-cache.outputs.cache-hit != 'true' && steps.bazel-cache.outputs.cache-hit != 'true'
+    - name: Save incremental Kleaf output cache
+      if: success() && steps.image-cache.outputs.cache-hit != 'true' && steps.kleaf-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
-        path: /home/runner/.cache/bazel
-        key: ${{ steps.bazel-cache.outputs.cache-primary-key }}
+        path: ${{ github.workspace }}/kernel/out/cache
+        key: ${{ steps.kleaf-cache.outputs.cache-primary-key }}
