@@ -20,6 +20,7 @@ jobs:
       BUILD_RECIPE_ID: inline-asix-v3-autofs-dormant-debug
       KLEAF_CACHE_NAMESPACE: gs201-android14-6.1-kleaf-v1
       KSU_NEXT_COMMIT: 86cf3441815fe71dbc35ff6c675c3eea3f946467
+      SUSFS_COMMIT: cb56310e94241ca516d81088e6bc2612d8c0c108
 
     steps:
     - name: Checkout pinned WildKernels recipe
@@ -37,9 +38,9 @@ jobs:
         fetch-depth: 1
         persist-credentials: false
 
-    - name: Test config integration tooling
+    - name: Test integration tooling
       shell: bash
-      run: python3 -m unittest discover -s build-assets/inline-ax88179ab -p 'test_kernel_config.py' -v
+      run: python3 -m unittest discover -s build-assets/inline-ax88179ab -p 'test_*.py' -v
 
     - name: Setup build environment
       uses: ./.github/actions/setup-build-environment
@@ -122,20 +123,30 @@ jobs:
         # This revision already declares the SELinux exports through SUSFS_EXPORT.
         # The historical static.patch is obsolete and was removed by upstream.
 
-    - name: Clone and integrate current SUSFS Android 14 / 6.1 dev
+    - name: Clone and integrate pinned SUSFS Android 14 / 6.1 dev
       shell: bash
       run: |
         set -euo pipefail
         susfs_repo="${{ github.workspace }}/susfs4ksu"
         kernel_tree="${{ github.workspace }}/kernel/common"
         rm -rf "$susfs_repo"
-        git clone --quiet --depth=1 --branch gki-android14-6.1-dev \
+        git clone --quiet --no-checkout --depth=1 --branch gki-android14-6.1-dev \
           --single-branch https://gitlab.com/pershoot/susfs4ksu.git "$susfs_repo"
+        git -C "$susfs_repo" fetch --quiet --depth=1 origin "$SUSFS_COMMIT"
+        git -C "$susfs_repo" checkout --quiet --detach "$SUSFS_COMMIT"
+        test "$(git -C "$susfs_repo" rev-parse HEAD)" = "$SUSFS_COMMIT"
+        git -C "$susfs_repo" rev-parse HEAD > build-provenance/susfs-source.txt
 
         cp "$susfs_repo/kernel_patches/fs/"* "$kernel_tree/fs/"
         cp "$susfs_repo/kernel_patches/include/linux/"* "$kernel_tree/include/linux/"
-        patch -d "$kernel_tree" -p1 --batch --forward \
-          < "$susfs_repo/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
+        source_patch="$susfs_repo/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
+        prepared_patch="${{ github.workspace }}/build-provenance/susfs-integrated.patch"
+        python3 "${{ github.workspace }}/build-assets/inline-ax88179ab/prepare-susfs-patch.py" \
+          --patch "$source_patch" --namespace "$kernel_tree/fs/namespace.c" \
+          --output "$prepared_patch"
+        sha256sum "$source_patch" "$prepared_patch" > build-provenance/susfs-patch-sha256.txt
+        patch -d "$kernel_tree" -p1 --batch --forward --fuzz=0 --dry-run < "$prepared_patch"
+        patch -d "$kernel_tree" -p1 --batch --forward --fuzz=0 < "$prepared_patch"
 
     - name: Enable KernelSU and SUSFS
       uses: ./.github/actions/set-kernel-config
