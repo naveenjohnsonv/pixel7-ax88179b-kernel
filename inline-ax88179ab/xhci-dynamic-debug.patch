@@ -1,0 +1,13 @@
+--- a/drivers/usb/host/Makefile
++++ b/drivers/usb/host/Makefile
+@@ -5,6 +5,10 @@
+ 
+ # tell define_trace.h where to find the xhci trace header
+ CFLAGS_xhci-trace.o := -I$(src)
++
++# Pixel Router: scoped diagnostics via the existing DYNAMIC_DEBUG_CORE.
++CFLAGS_xhci.o += -DDYNAMIC_DEBUG_MODULE
++CFLAGS_xhci-ring.o += -DDYNAMIC_DEBUG_MODULE
+ 
+ fhci-y := fhci-hcd.o fhci-hub.o fhci-q.o
+ fhci-y += fhci-mem.o fhci-tds.o fhci-sched.o

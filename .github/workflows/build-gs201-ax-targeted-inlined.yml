@@ -275,6 +275,9 @@ jobs:
         set -euo pipefail
         assets="${{ github.workspace }}/build-assets/inline-ax88179ab"
         config="${{ github.workspace }}/kernel/common/arch/arm64/configs/gki_defconfig"
+        kernel_tree="${{ github.workspace }}/kernel/common"
+        git -C "$kernel_tree" apply --check "$assets/xhci-dynamic-debug.patch"
+        git -C "$kernel_tree" apply "$assets/xhci-dynamic-debug.patch"
         python3 "$assets/kernel-config.py" apply \
           --fragment "$assets/autofs-debug.fragment" --config "$config"
         python3 "$assets/kernel-config.py" verify \
@@ -516,7 +519,7 @@ jobs:
         python3 "${{ github.workspace }}/build-assets/inline-ax88179ab/kernel-config.py" verify \
           --fragment "${{ github.workspace }}/build-assets/inline-ax88179ab/autofs-debug.fragment" \
           --config "$config"
-        for option in USER_NS IP_NF_TARGET_REJECT IP6_NF_TARGET_REJECT DEBUG_INFO_BTF BPF_EVENTS TRACE_MMIO_ACCESS KSU KSU_SUSFS; do
+        for option in DYNAMIC_DEBUG_CORE USER_NS IP_NF_TARGET_REJECT IP6_NF_TARGET_REJECT DEBUG_INFO_BTF BPF_EVENTS TRACE_MMIO_ACCESS KSU KSU_SUSFS; do
           grep -Fqx "CONFIG_${option}=y" "$config"
         done
         grep -Fqx 'CONFIG_USB_NET_DRIVERS=y' "$config"
