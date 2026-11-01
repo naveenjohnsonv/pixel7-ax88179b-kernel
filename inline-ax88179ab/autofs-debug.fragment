@@ -1,9 +1,9 @@
 # Pixel 7 Pro: on-demand mounts and ABI-checked optional diagnostics.
-# Added function/graph tracers shift structures used by prebuilt vendor modules.
+# Added function/graph tracers and snapshots alter prebuilt-module interfaces.
 # Keep existing BPF/kprobe/MMIO observation support instead.
 CONFIG_AUTOFS_FS=y
 CONFIG_FUNCTION_TRACER=n
 CONFIG_DYNAMIC_FTRACE=n
 CONFIG_FUNCTION_GRAPH_TRACER=n
 CONFIG_DYNAMIC_DEBUG=y
-CONFIG_TRACER_SNAPSHOT=y
+CONFIG_TRACER_SNAPSHOT=n
