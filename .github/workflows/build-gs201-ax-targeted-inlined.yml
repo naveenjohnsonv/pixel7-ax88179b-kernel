@@ -1,4 +1,4 @@
-name: Build GS201 with inline AX88179B and xHCI fix
+name: Build GS201 with inline AX88179B, autofs and dormant diagnostics
 
 permissions:
   contents: read
@@ -17,14 +17,15 @@ jobs:
     timeout-minutes: 120
 
     env:
-      BUILD_RECIPE_ID: inline-asix-v2-xhci-nsr-cred-fix
+      BUILD_RECIPE_ID: inline-asix-v3-autofs-dormant-debug
       KLEAF_CACHE_NAMESPACE: gs201-android14-6.1-kleaf-v1
 
     steps:
-    - name: Checkout current WildKernels recipe
+    - name: Checkout pinned WildKernels recipe
       uses: actions/checkout@v7
       with:
         repository: WildKernels/GKI_KernelSU_SUSFS
+        ref: 6052906542503519cfc9f63583fc2bd8b1a56344
         fetch-depth: 1
         persist-credentials: false
 
@@ -35,8 +36,15 @@ jobs:
         fetch-depth: 1
         persist-credentials: false
 
+    - name: Test config integration tooling
+      shell: bash
+      run: python3 -m unittest discover -s build-assets/inline-ax88179ab -p 'test_kernel_config.py' -v
+
     - name: Setup build environment
       uses: ./.github/actions/setup-build-environment
+      with:
+        version: android14-6.1
+        sublevel: "145"
       env:
         BOOT_SIGN_KEY: ${{ secrets.BOOT_SIGN_KEY }}
 
@@ -47,6 +55,20 @@ jobs:
         android_version: android14
         kernel_version: "6.1"
         os_patch_level: "2025-09"
+
+    - name: Record source inputs before patching
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p build-provenance
+        git -C kernel/common rev-parse HEAD > build-provenance/kernel-base-revision.txt
+        {
+          echo "integration=$(git -C build-assets rev-parse HEAD)"
+          echo "wildkernels=$(git rev-parse HEAD)"
+          echo "kernel=$(git -C kernel/common rev-parse HEAD)"
+          echo "kernel_patches=$(git -C kernel_patches rev-parse HEAD)"
+          echo "anykernel=$(git -C AnyKernel3 rev-parse HEAD)"
+        } > build-provenance/initial-sources.txt
 
     - name: Set deterministic build timestamp
       shell: bash
@@ -150,7 +172,8 @@ jobs:
       with:
         config_list: |
           CONFIG_USER_NS=y
-          CONFIG_NETFILTER_XT_TARGET_REJECT=y
+          CONFIG_IP_NF_TARGET_REJECT=y
+          CONFIG_IP6_NF_TARGET_REJECT=y
 
     - name: Apply NTSync patches
       uses: ./.github/actions/ntsync
@@ -228,6 +251,17 @@ jobs:
 
     - name: Clean kernel flags
       uses: ./.github/actions/clean-kernel-flags
+
+    - name: Apply autofs and dormant diagnostic config
+      shell: bash
+      run: |
+        set -euo pipefail
+        assets="${{ github.workspace }}/build-assets/inline-ax88179ab"
+        config="${{ github.workspace }}/kernel/common/arch/arm64/configs/gki_defconfig"
+        python3 "$assets/kernel-config.py" apply \
+          --fragment "$assets/autofs-debug.fragment" --config "$config"
+        python3 "$assets/kernel-config.py" verify \
+          --fragment "$assets/autofs-debug.fragment" --config "$config"
 
     - name: Verify final source tree
       shell: bash
@@ -320,11 +354,17 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        manifest="$(mktemp)"
-        trap 'rm -f "$manifest"' EXIT
+        manifest="${{ github.workspace }}/build-provenance/build-fingerprint.txt"
+        mkdir -p "$(dirname "$manifest")"
+        kernel_base="$(cat build-provenance/kernel-base-revision.txt)"
+        git -C kernel/common diff --binary --no-ext-diff "$kernel_base" \
+          > build-provenance/kernel-integration.patch
 
         {
           echo "recipe=${BUILD_RECIPE_ID}"
+          echo "integration=$(git -C build-assets rev-parse HEAD)"
+          sha256sum build-assets/inline-ax88179ab/autofs-debug.fragment
+          echo "kernel-base=$kernel_base"
           echo "wildkernels=$(git rev-parse HEAD)"
           echo "kernel=$(git -C kernel/common rev-parse HEAD)"
           echo "ksu=$(git -C kernel/KernelSU-Next rev-parse HEAD)"
@@ -350,7 +390,7 @@ jobs:
       uses: actions/cache/restore@v6
       with:
         path: ${{ github.workspace }}/compiled-output
-        key: kernel-inline-output-v4-${{ steps.fingerprint.outputs.value }}
+        key: kernel-inline-output-v5-${{ steps.fingerprint.outputs.value }}
 
     - name: Free disk space for compilation
       if: steps.image-cache.outputs.cache-hit != 'true'
@@ -416,7 +456,7 @@ jobs:
       uses: ./.github/actions/build-kernel
       with:
         version: android14-6.1
-        bypass: false
+        page_size: "4k"
 
     - name: Stage freshly compiled outputs
       if: steps.image-cache.outputs.cache-hit != 'true'
@@ -430,6 +470,7 @@ jobs:
         cp "$source_dir/mii.ko" "$output_dir/mii.ko"
         cp "$source_dir/ax88179_178a.ko" "$output_dir/ax88179_178a.ko"
         cp "$source_dir/System.map" "$output_dir/System.map"
+        cp "$source_dir/vmlinux" "$output_dir/vmlinux"
 
     - name: Restore cached Image into build output
       if: steps.image-cache.outputs.cache-hit == 'true'
@@ -452,6 +493,13 @@ jobs:
 
         test -s "$image"
         "$kernel_tree/scripts/extract-ikconfig" "$image" > "$config"
+        cp "$config" "$output_dir/kernel.config"
+        python3 "${{ github.workspace }}/build-assets/inline-ax88179ab/kernel-config.py" verify \
+          --fragment "${{ github.workspace }}/build-assets/inline-ax88179ab/autofs-debug.fragment" \
+          --config "$config"
+        for option in USER_NS IP_NF_TARGET_REJECT IP6_NF_TARGET_REJECT DEBUG_INFO_BTF BPF_EVENTS TRACE_MMIO_ACCESS; do
+          grep -Fqx "CONFIG_${option}=y" "$config"
+        done
         grep -Fqx 'CONFIG_USB_NET_DRIVERS=y' "$config"
         grep -Fqx 'CONFIG_MII=m' "$config"
         grep -Fqx 'CONFIG_USB_NET_AX_USB_NIC=y' "$config"
@@ -472,6 +520,9 @@ jobs:
         test -s "$mii_module"
         test -s "$stock_ax_module"
         test -s "$system_map"
+        test -s "$output_dir/vmlinux"
+        readelf -SW "$output_dir/vmlinux" > "$output_dir/vmlinux-sections.txt"
+        grep -Eq '[[:space:]]\.BTF[[:space:]]' "$output_dir/vmlinux-sections.txt"
         modinfo "$mii_module" | grep -Eq '^name:[[:space:]]+mii$'
         ! modinfo "$stock_ax_module" | \
           grep -Eiq 'alias:.*v00000B95p00001790'
@@ -486,7 +537,7 @@ jobs:
       uses: actions/cache/save@v6
       with:
         path: ${{ github.workspace }}/compiled-output
-        key: kernel-inline-output-v4-${{ steps.fingerprint.outputs.value }}
+        key: kernel-inline-output-v5-${{ steps.fingerprint.outputs.value }}
 
     - name: Create flashable AnyKernel3 ZIP
       shell: bash
@@ -557,6 +608,9 @@ jobs:
         git -C "$ksu_tree" diff --binary --no-ext-diff HEAD \
           > "$evidence/kernelsu.diff"
         cp "$kernel_tree/ax88179ab-inline.fragment" "$evidence/"
+        cp build-assets/inline-ax88179ab/autofs-debug.fragment "$evidence/"
+        cp compiled-output/kernel.config "$evidence/"
+        cp compiled-output/vmlinux-sections.txt "$evidence/"
         grep -E \
           '^(CONFIG_USB_NET_DRIVERS|CONFIG_MII|CONFIG_USB_NET_AX_USB_NIC)=' \
           "$kernel_tree/arch/arm64/configs/gki_defconfig" \
@@ -566,6 +620,8 @@ jobs:
           "${{ github.workspace }}/compiled-output/mii.ko" \
           "${{ github.workspace }}/compiled-output/ax88179_178a.ko" \
           "${{ github.workspace }}/compiled-output/System.map" \
+          "${{ github.workspace }}/compiled-output/vmlinux" \
+          "${{ github.workspace }}/compiled-output/kernel.config" \
           > "$evidence/compiled-output-sha256.txt"
         modinfo "${{ github.workspace }}/compiled-output/mii.ko" \
           > "$evidence/mii-modinfo.txt"
@@ -593,6 +649,28 @@ jobs:
         if-no-files-found: error
         compression-level: 9
         retention-days: 14
+
+    - name: Upload kernel debug artifacts for recorder qualification
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.extract.outputs.file_name }}-AX88179B-INLINE-debug
+        path: |
+          ${{ github.workspace }}/compiled-output/vmlinux
+          ${{ github.workspace }}/compiled-output/System.map
+          ${{ github.workspace }}/compiled-output/kernel.config
+        if-no-files-found: error
+        compression-level: 6
+        retention-days: 30
+
+    - name: Upload source provenance even on failure
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: GS201-inline-source-provenance-${{ github.run_id }}
+        path: ${{ github.workspace }}/build-provenance/**
+        if-no-files-found: warn
+        compression-level: 9
+        retention-days: 90
 
     - name: Report incremental Kleaf output cache
       if: steps.image-cache.outputs.cache-hit != 'true'
