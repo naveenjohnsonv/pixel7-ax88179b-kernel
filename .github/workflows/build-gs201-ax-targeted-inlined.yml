@@ -19,6 +19,7 @@ jobs:
     env:
       BUILD_RECIPE_ID: inline-asix-v3-autofs-dormant-debug
       KLEAF_CACHE_NAMESPACE: gs201-android14-6.1-kleaf-v1
+      KSU_NEXT_COMMIT: 86cf3441815fe71dbc35ff6c675c3eea3f946467
 
     steps:
     - name: Checkout pinned WildKernels recipe
@@ -98,14 +99,19 @@ jobs:
         sublevel: ${{ steps.extract.outputs.sublevel }}
         os_patch_level: "2025-09"
 
-    - name: Clone and integrate current KernelSU-Next dev-susfs
+    - name: Clone and integrate pinned KernelSU-Next dev-susfs
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
         set -euo pipefail
         rm -rf KernelSU-Next
-        git clone --quiet --depth=1 --branch dev-susfs --single-branch \
+        git clone --quiet --no-checkout --depth=1 --branch dev-susfs --single-branch \
           https://github.com/pershoot/KernelSU-Next.git KernelSU-Next
+        git -C KernelSU-Next fetch --quiet --depth=1 origin "$KSU_NEXT_COMMIT"
+        git -C KernelSU-Next checkout --quiet --detach "$KSU_NEXT_COMMIT"
+        test "$(git -C KernelSU-Next rev-parse HEAD)" = "$KSU_NEXT_COMMIT"
+        git -C KernelSU-Next rev-parse HEAD \
+          > "${{ github.workspace }}/build-provenance/kernelsu-source.txt"
 
         ln -sfn ../../KernelSU-Next/kernel common/drivers/kernelsu
         grep -q 'obj-$(CONFIG_KSU) += kernelsu/' common/drivers/Makefile || \
@@ -113,8 +119,8 @@ jobs:
         grep -q 'source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig || \
           sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' common/drivers/Kconfig
 
-        patch -d KernelSU-Next -p1 --batch --forward \
-          < "${{ github.workspace }}/.github/actions/kernelsu/patches/static.patch"
+        # This revision already declares the SELinux exports through SUSFS_EXPORT.
+        # The historical static.patch is obsolete and was removed by upstream.
 
     - name: Clone and integrate current SUSFS Android 14 / 6.1 dev
       shell: bash
@@ -497,7 +503,7 @@ jobs:
         python3 "${{ github.workspace }}/build-assets/inline-ax88179ab/kernel-config.py" verify \
           --fragment "${{ github.workspace }}/build-assets/inline-ax88179ab/autofs-debug.fragment" \
           --config "$config"
-        for option in USER_NS IP_NF_TARGET_REJECT IP6_NF_TARGET_REJECT DEBUG_INFO_BTF BPF_EVENTS TRACE_MMIO_ACCESS; do
+        for option in USER_NS IP_NF_TARGET_REJECT IP6_NF_TARGET_REJECT DEBUG_INFO_BTF BPF_EVENTS TRACE_MMIO_ACCESS KSU KSU_SUSFS; do
           grep -Fqx "CONFIG_${option}=y" "$config"
         done
         grep -Fqx 'CONFIG_USB_NET_DRIVERS=y' "$config"
