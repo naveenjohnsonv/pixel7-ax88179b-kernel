@@ -31,7 +31,8 @@ class KernelConfigTests(unittest.TestCase):
         self.apply()
         first = self.config.read_bytes()
         self.assertIn(b'CONFIG_USER_NS=y\n', first)
-        self.assertEqual(first.count(b'CONFIG_FUNCTION_TRACER='), 1)
+        self.assertEqual(first.count(b'# CONFIG_FUNCTION_TRACER is not set'), 1)
+        self.assertNotIn(b'CONFIG_FUNCTION_TRACER=', first)
         self.run_tool('apply')
         self.assertEqual(first, self.config.read_bytes())
         self.run_tool('verify')
@@ -42,11 +43,21 @@ class KernelConfigTests(unittest.TestCase):
         requests = [l for l in self.fragment.read_text().splitlines() if l.startswith('CONFIG_')]
         self.assertEqual(len(requests), 6)
         for entry in requests:
-            for replacement in ['', entry[:-1] + 'm', '# ' + entry[:-2] + ' is not set']:
+            key, value = entry.split('=')
+            canonical = '# '+key+' is not set' if value == 'n' else entry
+            replacements = [key+'=y', key+'=m'] if value == 'n' else ['', key+'=m', '# '+key+' is not set']
+            for replacement in replacements:
                 with self.subTest(entry=entry, replacement=replacement):
-                    self.config.write_text(good.replace(entry, replacement))
+                    self.config.write_text(good.replace(canonical, replacement))
                     result = self.run_tool('verify', success=False)
                     self.assertIn(entry[:-2], result.stderr)
+
+    def test_disabled_dependent_symbols_may_be_absent(self):
+        self.apply()
+        good = self.config.read_text()
+        self.config.write_text(good.replace('# CONFIG_DYNAMIC_FTRACE is not set\n', '')
+                              .replace('# CONFIG_FUNCTION_GRAPH_TRACER is not set\n', ''))
+        self.run_tool('verify')
 
     def test_verification_rejects_duplicate_effective_values(self):
         self.apply()

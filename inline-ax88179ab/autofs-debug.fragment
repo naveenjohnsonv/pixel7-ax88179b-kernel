@@ -1,8 +1,9 @@
-# Pixel 7 Pro: on-demand mounts and diagnostic capabilities.
-# Runtime tracing/debug consumers remain disabled until explicitly activated.
+# Pixel 7 Pro: on-demand mounts and ABI-checked optional diagnostics.
+# Added function/graph tracers shift structures used by prebuilt vendor modules.
+# Keep existing BPF/kprobe/MMIO observation support instead.
 CONFIG_AUTOFS_FS=y
-CONFIG_FUNCTION_TRACER=y
-CONFIG_DYNAMIC_FTRACE=y
-CONFIG_FUNCTION_GRAPH_TRACER=y
+CONFIG_FUNCTION_TRACER=n
+CONFIG_DYNAMIC_FTRACE=n
+CONFIG_FUNCTION_GRAPH_TRACER=n
 CONFIG_DYNAMIC_DEBUG=y
 CONFIG_TRACER_SNAPSHOT=y

@@ -1,4 +1,4 @@
-name: Build GS201 with inline AX88179B, autofs and dormant diagnostics
+name: Build GS201 with inline AX88179B, autofs and ABI-checked diagnostics
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 120
 
     env:
-      BUILD_RECIPE_ID: inline-asix-v3-autofs-dormant-debug
+      BUILD_RECIPE_ID: inline-asix-v4-autofs-module-abi
       KLEAF_CACHE_NAMESPACE: gs201-android14-6.1-kleaf-v1
       KSU_NEXT_COMMIT: 86cf3441815fe71dbc35ff6c675c3eea3f946467
       SUSFS_COMMIT: cb56310e94241ca516d81088e6bc2612d8c0c108
@@ -269,7 +269,7 @@ jobs:
     - name: Clean kernel flags
       uses: ./.github/actions/clean-kernel-flags
 
-    - name: Apply autofs and dormant diagnostic config
+    - name: Apply autofs and ABI-checked diagnostic config
       shell: bash
       run: |
         set -euo pipefail
@@ -381,6 +381,7 @@ jobs:
           echo "recipe=${BUILD_RECIPE_ID}"
           echo "integration=$(git -C build-assets rev-parse HEAD)"
           sha256sum build-assets/inline-ax88179ab/autofs-debug.fragment
+          sha256sum build-assets/inline-ax88179ab/module-abi-baseline.json
           echo "kernel-base=$kernel_base"
           echo "wildkernels=$(git rev-parse HEAD)"
           echo "kernel=$(git -C kernel/common rev-parse HEAD)"
@@ -407,7 +408,7 @@ jobs:
       uses: actions/cache/restore@v6
       with:
         path: ${{ github.workspace }}/compiled-output
-        key: kernel-inline-output-v5-${{ steps.fingerprint.outputs.value }}
+        key: kernel-inline-output-v6-${{ steps.fingerprint.outputs.value }}
 
     - name: Free disk space for compilation
       if: steps.image-cache.outputs.cache-hit != 'true'
@@ -498,6 +499,7 @@ jobs:
           "${{ github.workspace }}/AnyKernel3/Image"
 
     - name: Verify compiled Image
+      id: verify_image
       shell: bash
       run: |
         set -euo pipefail
@@ -547,6 +549,11 @@ jobs:
         grep -Eq ' T ax_generic_mii_ioctl$' "$system_map"
         ! grep -Eq ' T (mii_nway_restart|generic_mii_ioctl)$' "$system_map"
 
+        python3 "${{ github.workspace }}/build-assets/inline-ax88179ab/module-abi.py" \
+          --vmlinux "$output_dir/vmlinux" \
+          --baseline "${{ github.workspace }}/build-assets/inline-ax88179ab/module-abi-baseline.json" \
+          --report "${{ github.workspace }}/build-provenance/module-abi-check.json"
+
         echo 'compiled outputs contain collision-free inline ASIX and Exynos xHCI fix'
 
     - name: Save verified build outputs
@@ -554,7 +561,7 @@ jobs:
       uses: actions/cache/save@v6
       with:
         path: ${{ github.workspace }}/compiled-output
-        key: kernel-inline-output-v5-${{ steps.fingerprint.outputs.value }}
+        key: kernel-inline-output-v6-${{ steps.fingerprint.outputs.value }}
 
     - name: Create flashable AnyKernel3 ZIP
       shell: bash
@@ -627,6 +634,7 @@ jobs:
         cp "$kernel_tree/ax88179ab-inline.fragment" "$evidence/"
         cp build-assets/inline-ax88179ab/autofs-debug.fragment "$evidence/"
         cp compiled-output/kernel.config "$evidence/"
+        cp build-provenance/module-abi-check.json "$evidence/"
         cp compiled-output/vmlinux-sections.txt "$evidence/"
         grep -E \
           '^(CONFIG_USB_NET_DRIVERS|CONFIG_MII|CONFIG_USB_NET_AX_USB_NIC)=' \
@@ -668,6 +676,7 @@ jobs:
         retention-days: 14
 
     - name: Upload kernel debug artifacts for recorder qualification
+      if: ${{ always() && (steps.verify_image.outcome == 'success' || steps.verify_image.outcome == 'failure') }}
       uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.extract.outputs.file_name }}-AX88179B-INLINE-debug

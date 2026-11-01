@@ -56,8 +56,12 @@ def configure(mode, fragment, config):
                 effective[match[1]].append(match[2])
             elif disabled and disabled[1] in effective:
                 effective[disabled[1]].append('n')
+        # Kconfig omits dependent symbols when their parent is disabled.
+        # An n request accepts that absence, while any y/m value or duplicate
+        # still fails. Positive requirements must always be explicitly present.
         failures = [f'{key}: expected {value}, found {effective[key] or "missing"}'
-                    for key, value in wanted.items() if effective[key] != [value]]
+                    for key, value in wanted.items()
+                    if effective[key] != [value] and not (value == 'n' and not effective[key])]
         if failures:
             raise ValueError('configuration requirements failed:\n' + '\n'.join(failures))
     print(f'{mode}: {len(wanted)} requirements passed in {config}')
